@@ -22,6 +22,7 @@ The project is designed especially for KDE Plasma users, but it should also work
 - Provide a safe interactive installer
 - Provide a conservative uninstaller
 - Avoid running the graphical application as root
+- Select English, Spanish, or your system language in Preferences
 
 ## Current status
 
@@ -90,6 +91,28 @@ PlasmaDDC
 ```
 
 in the application launcher.
+
+## Language preferences
+
+Choose **Preferences → Language…** to select **System default**, **English**, or
+**Español**. Changes take effect immediately and are remembered between launches.
+**System default** follows the desktop locale: Spanish locales use Spanish;
+English, unsupported, or unavailable locales use English.
+
+The preference is stored in Qt's per-user settings (`PlasmaDDC/PlasmaDDC`, key
+`language`). On Linux this is normally `~/.config/PlasmaDDC/PlasmaDDC.conf`.
+Language changes only refresh the interface and read monitor values; they do not
+change monitor settings. Raw diagnostic output comes from `ddcutil` unchanged.
+
+English messages are the fallback source text. The Spanish catalog lives in
+`translations/es.json`; translated messages must preserve their format placeholders.
+The standalone CLI keeps its existing commands and output format.
+
+To run the language and GUI checks without a connected monitor:
+
+```bash
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m unittest discover -s tests -v
+```
 
 ## CLI usage
 

@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from i18n import _
+
 
 # =============================================================================
 # Importación opcional de monitorcontrol
@@ -188,7 +190,7 @@ class VCPValue:
 
     def as_text(self) -> str:
         if not self.supported:
-            return f"{self.code_hex}: no soportado"
+            return _("{self_code_hex}: unsupported").format(self_code_hex=self.code_hex)
 
         if self.current is not None and self.maximum is not None:
             return f"{self.code_hex}: {self.current}/{self.maximum}"
@@ -204,7 +206,7 @@ class VCPValue:
         if self.label:
             return f"{self.code_hex}: {self.label}"
 
-        return f"{self.code_hex}: sin valor interpretado"
+        return _("{self_code_hex}: no parsed value").format(self_code_hex=self.code_hex)
 
 
 @dataclass
@@ -239,7 +241,7 @@ def normalize_vcp_code(code: int | str) -> int:
             value = int(text, 16)
 
     if value < 0 or value > 0xFF:
-        raise ValueError(f"Código VCP fuera de rango: {code}")
+        raise ValueError(_("VCP code out of range: {code}").format(code=code))
 
     return value
 
@@ -248,11 +250,13 @@ def format_vcp_code(code: int | str) -> str:
     return f"0x{normalize_vcp_code(code):02X}"
 
 
-def normalize_percent(value: int, name: str = "valor") -> int:
+def normalize_percent(value: int, name: str = "value") -> int:
     value = int(value)
 
     if value < 0 or value > 100:
-        raise ValueError(f"{name} debe estar entre 0 y 100. Valor recibido: {value}")
+        raise ValueError(
+            _("{name} must be between 0 and 100. Received: {value}").format(name=_(name), value=value)
+        )
 
     return value
 
@@ -277,7 +281,7 @@ def input_source_to_int(value: int | str) -> int:
     text = str(value).strip()
 
     if not text:
-        raise ValueError("Entrada de vídeo vacía.")
+        raise ValueError(_("Empty video input."))
 
     upper = text.upper()
 
@@ -458,7 +462,7 @@ class DDCUtilRunner:
 
     def require_available(self) -> None:
         if not self.available():
-            raise DDCUtilUnavailableError("ddcutil no está instalado o no está en PATH.")
+            raise DDCUtilUnavailableError(_("ddcutil is not installed or is not in PATH."))
 
     def _selection_args(
         self,
@@ -503,7 +507,9 @@ class DDCUtilRunner:
             )
         except subprocess.TimeoutExpired as exc:
             raise PlasmaDDCError(
-                f"ddcutil tardó demasiado ejecutando: {' '.join(full_cmd)}"
+                _("ddcutil timed out running: {join_full_cmd}").format(
+                    join_full_cmd=" ".join(full_cmd)
+                )
             ) from exc
         except OSError as exc:
             raise DDCUtilUnavailableError(str(exc)) from exc
@@ -519,12 +525,15 @@ class DDCUtilRunner:
                 or "permiso" in lowered
                 or "access" in lowered
             ):
-                raise DDCPermissionError(output or "Permiso denegado usando ddcutil.")
+                raise DDCPermissionError(output or _("Permission denied using ddcutil."))
 
             if "unsupported" in lowered or "not supported" in lowered:
                 raise VCPUnsupportedError(output)
 
-            raise PlasmaDDCError(output or f"ddcutil falló: {' '.join(full_cmd)}")
+            raise PlasmaDDCError(
+                output
+                or _("ddcutil failed: {join_full_cmd}").format(join_full_cmd=" ".join(full_cmd))
+            )
 
         return output
 
@@ -628,7 +637,9 @@ class PlasmaDDCBackend:
     def require_monitorcontrol(self) -> None:
         if not self.monitorcontrol_available():
             raise MonitorControlUnavailableError(
-                f"monitorcontrol no está disponible: {MONITORCONTROL_IMPORT_ERROR}"
+                _("monitorcontrol is unavailable: {MONITORCONTROL_IMPORT_ERROR}").format(
+                    MONITORCONTROL_IMPORT_ERROR=MONITORCONTROL_IMPORT_ERROR
+                )
             )
 
     # -------------------------------------------------------------------------
@@ -704,7 +715,9 @@ class PlasmaDDCBackend:
         monitors = self.list_monitors()
 
         if index < 0 or index >= len(monitors):
-            raise MonitorNotFoundError(f"No existe el monitor con índice {index}")
+            raise MonitorNotFoundError(
+                _("No monitor exists with index {index}").format(index=index)
+            )
 
         return monitors[index]
 
@@ -733,7 +746,7 @@ class PlasmaDDCBackend:
 
         if index < 0 or index >= len(self._monitorcontrol_monitors):
             raise MonitorNotFoundError(
-                f"monitorcontrol no tiene monitor con índice {index}"
+                _("monitorcontrol has no monitor with index {index}").format(index=index)
             )
 
         return self._monitorcontrol_monitors[index]
@@ -746,19 +759,23 @@ class PlasmaDDCBackend:
                 method = getattr(monitor, method_name)
                 return method(*args)
         except VCPPermissionError as exc:
-            raise DDCPermissionError(
-                "monitorcontrol no tiene permisos sobre DDC/CI."
-            ) from exc
+            raise DDCPermissionError(_("monitorcontrol does not have DDC/CI permissions.")) from exc
         except (VCPError, VCPIOError) as exc:
             raise VCPUnsupportedError(
-                f"monitorcontrol falló en {method_name}: {exc}"
+                _("monitorcontrol failed in {method_name}: {exc}").format(
+                    method_name=method_name, exc=exc
+                )
             ) from exc
         except AttributeError as exc:
             raise PlasmaDDCError(
-                f"monitorcontrol no tiene el método {method_name}"
+                _("monitorcontrol has no method {method_name}").format(method_name=method_name)
             ) from exc
         except Exception as exc:
-            raise PlasmaDDCError(f"monitorcontrol falló en {method_name}: {exc}") from exc
+            raise PlasmaDDCError(
+                _("monitorcontrol failed in {method_name}: {exc}").format(
+                    method_name=method_name, exc=exc
+                )
+            ) from exc
 
     def test_monitorcontrol_reliability(self, index: int = 0) -> bool:
         if not self.monitorcontrol_available():
@@ -856,19 +873,19 @@ class PlasmaDDCBackend:
         return self.get_vcp(index, VCP_BRIGHTNESS)
 
     def set_brightness(self, index: int, value: int) -> str:
-        return self.set_vcp(index, VCP_BRIGHTNESS, normalize_percent(value, "brillo"))
+        return self.set_vcp(index, VCP_BRIGHTNESS, normalize_percent(value, _("brightness")))
 
     def get_contrast(self, index: int = 0) -> VCPValue:
         return self.get_vcp(index, VCP_CONTRAST)
 
     def set_contrast(self, index: int, value: int) -> str:
-        return self.set_vcp(index, VCP_CONTRAST, normalize_percent(value, "contraste"))
+        return self.set_vcp(index, VCP_CONTRAST, normalize_percent(value, _("contrast")))
 
     def get_volume(self, index: int = 0) -> VCPValue:
         return self.get_vcp(index, VCP_AUDIO_VOLUME)
 
     def set_volume(self, index: int, value: int) -> str:
-        return self.set_vcp(index, VCP_AUDIO_VOLUME, normalize_percent(value, "volumen"))
+        return self.set_vcp(index, VCP_AUDIO_VOLUME, normalize_percent(value, _("volume")))
 
     def get_color_preset(self, index: int = 0) -> VCPValue:
         return self.get_vcp(index, VCP_COLOR_PRESET)
@@ -896,7 +913,7 @@ class PlasmaDDCBackend:
         key = color.strip().lower()
 
         if key not in RGB_GAIN_CODES:
-            raise ValueError(f"Color RGB no válido: {color}")
+            raise ValueError(_("Invalid RGB color: {color}").format(color=color))
 
         return self.get_vcp(index, RGB_GAIN_CODES[key])
 
@@ -904,12 +921,12 @@ class PlasmaDDCBackend:
         key = color.strip().lower()
 
         if key not in RGB_GAIN_CODES:
-            raise ValueError(f"Color RGB no válido: {color}")
+            raise ValueError(_("Invalid RGB color: {color}").format(color=color))
 
         return self.set_vcp(
             index=index,
             code=RGB_GAIN_CODES[key],
-            value=normalize_percent(value, f"ganancia {color}"),
+            value=normalize_percent(value, _("gain {color}").format(color=color)),
         )
 
     # -------------------------------------------------------------------------
@@ -949,22 +966,22 @@ class PlasmaDDCBackend:
 def smoke_test() -> int:
     backend = PlasmaDDCBackend()
 
-    print("PlasmaDDC backend v2 - prueba rápida")
+    print(_("PlasmaDDC backend v2 - quick test"))
     print()
-    print("Backend principal: ddcutil")
-    print("Backend auxiliar: monitorcontrol")
+    print(_("Main backend: ddcutil"))
+    print(_("Auxiliary backend: monitorcontrol"))
     print()
-    print("ddcutil disponible:", backend.ddcutil_available())
-    print("monitorcontrol disponible:", backend.monitorcontrol_available())
+    print(_("ddcutil available:"), backend.ddcutil_available())
+    print(_("monitorcontrol available:"), backend.monitorcontrol_available())
     print()
 
     monitors = backend.refresh_monitors()
 
     if not monitors:
-        print("No se han detectado monitores.")
+        print(_("No monitors detected."))
         return 1
 
-    print(f"Monitores detectados por PlasmaDDC: {len(monitors)}")
+    print(_("Monitors detected by PlasmaDDC: {len_monitors}").format(len_monitors=len(monitors)))
 
     for monitor in monitors:
         print()
@@ -976,10 +993,10 @@ def smoke_test() -> int:
         print(f"  model_name: {monitor.model_name}")
 
         mc_ok = backend.monitorcontrol_reliable(monitor.index)
-        print(f"  monitorcontrol fiable para VCP básicos: {mc_ok}")
+        print(_("  monitorcontrol reliable for basic VCP controls: {mc_ok}").format(mc_ok=mc_ok))
 
         print()
-        print("  VCPs comunes vía ddcutil:")
+        print(_("  Common VCP controls via ddcutil:"))
 
         for key, code in COMMON_VCPS.items():
             try:
@@ -987,13 +1004,25 @@ def smoke_test() -> int:
                 print(f"    {key:14s} {value.as_text()}")
 
                 if key == "input_source" and value.selector is not None:
-                    print(f"                  etiqueta normalizada: {input_source_label(value.selector)}")
+                    print(
+                        _(
+                            "                  normalized label: {input_source_label_value_selector}"
+                        ).format(
+                            input_source_label_value_selector=input_source_label(value.selector)
+                        )
+                    )
 
                 if key == "color_preset" and value.selector is not None:
-                    print(f"                  etiqueta normalizada: {color_preset_label(value.selector)}")
+                    print(
+                        _(
+                            "                  normalized label: {color_preset_label_value_selector}"
+                        ).format(
+                            color_preset_label_value_selector=color_preset_label(value.selector)
+                        )
+                    )
 
             except Exception as exc:
-                print(f"    {key:14s} no disponible ({exc})")
+                print(_("    {key:14s} unavailable ({exc})").format(key=key, exc=exc))
 
     return 0
 
