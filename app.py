@@ -5,11 +5,13 @@ import sys
 from dataclasses import dataclass
 from typing import Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QLocale, QSettings, Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFrame,
     QFormLayout,
     QGroupBox,
@@ -30,6 +32,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from i18n import _, language_manager
+
 from backend import (
     COMMON_INPUT_SOURCES,
     COMMON_VCPS,
@@ -43,6 +47,40 @@ from backend import (
 
 
 APP_NAME = "PlasmaDDC"
+
+
+class LanguagePreferencesDialog(QDialog):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(_("Language preferences"))
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.language_combo = QComboBox()
+        self.language_combo.addItem(_("System default"), "system")
+        self.language_combo.addItem("English", "en")
+        self.language_combo.addItem("Español", "es")
+        self.language_combo.setCurrentIndex(
+            self.language_combo.findData(language_manager.preference)
+        )
+        form.addRow(_("Language:"), self.language_combo)
+        layout.addLayout(form)
+        description = QLabel(
+            _(
+                "System default follows your desktop language. "
+                "Unsupported languages use English. Changes take effect immediately."
+            )
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+        buttons = QDialogButtonBox()
+        buttons.addButton(_("Cancel"), QDialogButtonBox.RejectRole)
+        buttons.addButton(_("OK"), QDialogButtonBox.AcceptRole)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def selected_language(self) -> str:
+        return str(self.language_combo.currentData())
 
 
 @dataclass(frozen=True)
@@ -94,8 +132,8 @@ class ValueControl(QWidget):
         self.spin.setRange(0, 100)
         self.spin.setMinimumWidth(80)
 
-        self.apply_button = QPushButton("Aplicar")
-        self.read_button = QPushButton("Leer")
+        self.apply_button = QPushButton(_("Apply"))
+        self.read_button = QPushButton(_("Read"))
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
 
@@ -121,7 +159,7 @@ class ValueControl(QWidget):
         maximum = value.maximum or 100
 
         if current is None:
-            self.set_unavailable("Sin valor numérico interpretado.")
+            self.set_unavailable(_("No numeric value could be parsed."))
             return
 
         self.slider.blockSignals(True)
@@ -144,7 +182,7 @@ class ValueControl(QWidget):
 
     def set_unavailable(self, reason: str) -> None:
         self.setEnabled(False)
-        self.status_label.setText(f"No disponible: {reason}")
+        self.status_label.setText(_("Unavailable: {reason}").format(reason=reason))
 
     def value(self) -> int:
         return int(self.spin.value())
@@ -161,6 +199,11 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
 
+        self.settings = QSettings(APP_NAME, APP_NAME)
+        language_manager.configure(
+            self.settings.value("language", "system", type=str),
+            QLocale.system().name(),
+        )
         self.backend = PlasmaDDCBackend()
         self.monitors = []
         self.current_profile = None
@@ -202,7 +245,7 @@ class MainWindow(QMainWindow):
         root.addWidget(splitter, 1)
 
         self.setCentralWidget(central)
-        self.statusBar().showMessage("Preparado")
+        self.statusBar().showMessage(_("Ready"))
 
         self._create_pages()
 
@@ -216,7 +259,7 @@ class MainWindow(QMainWindow):
         title_box = QVBoxLayout()
         title = QLabel(APP_NAME)
         title.setStyleSheet("font-size: 20px; font-weight: 600;")
-        subtitle = QLabel("Control de monitor mediante DDC/CI")
+        subtitle = QLabel(_("Monitor control through DDC/CI"))
         subtitle.setStyleSheet("opacity: 0.75;")
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
@@ -225,8 +268,8 @@ class MainWindow(QMainWindow):
         self.monitor_combo.setMinimumWidth(340)
         self.monitor_combo.currentIndexChanged.connect(self.load_current_monitor)
 
-        self.refresh_button = QPushButton("Detectar monitores")
-        self.reload_button = QPushButton("Leer valores")
+        self.refresh_button = QPushButton(_("Detect monitors"))
+        self.reload_button = QPushButton(_("Read values"))
         self.refresh_button.clicked.connect(self.refresh_monitors)
         self.reload_button.clicked.connect(self.load_current_monitor)
 
@@ -239,29 +282,73 @@ class MainWindow(QMainWindow):
         return box
 
     def _build_menu(self) -> None:
-        refresh_action = QAction("Leer valores", self)
+        app_menu = self.menuBar().addMenu("PlasmaDDC")
+        refresh_action = QAction(_("Read values"), app_menu)
         refresh_action.triggered.connect(self.load_current_monitor)
 
-        detect_action = QAction("Detectar monitores", self)
+        detect_action = QAction(_("Detect monitors"), app_menu)
         detect_action.triggered.connect(self.refresh_monitors)
 
-        quit_action = QAction("Salir", self)
+        quit_action = QAction(_("Quit"), app_menu)
         quit_action.triggered.connect(self.close)
 
-        app_menu = self.menuBar().addMenu("PlasmaDDC")
         app_menu.addAction(refresh_action)
         app_menu.addAction(detect_action)
         app_menu.addSeparator()
         app_menu.addAction(quit_action)
 
+        preferences_menu = self.menuBar().addMenu(_("Preferences"))
+        language_action = QAction(_("Language…"), preferences_menu)
+        language_action.triggered.connect(self.show_language_preferences)
+        preferences_menu.addAction(language_action)
+
+    def show_language_preferences(self) -> None:
+        dialog = LanguagePreferencesDialog(self)
+        if dialog.exec() == QDialog.Accepted:
+            self.set_language_preference(dialog.selected_language())
+        dialog.deleteLater()
+
+    def set_language_preference(self, preference: str) -> None:
+        if preference == language_manager.preference:
+            return
+        language_manager.configure(preference, QLocale.system().name())
+        self.settings.setValue("language", language_manager.preference)
+        self.settings.sync()
+
+        # Rebuild translated widgets without changing hardware settings. Preserve
+        # the selected monitor and page, and re-read localized status/errors.
+        page = self.sidebar.currentRow()
+        monitor_index = self.current_monitor_index()
+        old_central = self.takeCentralWidget()
+        self._build_ui()
+        for action in self.menuBar().actions():
+            menu = action.menu()
+            if menu is not None:
+                menu.deleteLater()
+        self.menuBar().clear()
+        self._build_menu()
+        if old_central is not None:
+            old_central.deleteLater()
+        self.monitor_combo.blockSignals(True)
+        for monitor in self.monitors:
+            self.monitor_combo.addItem(monitor.label, monitor.index)
+        self.monitor_combo.setCurrentIndex(self.monitor_combo.findData(monitor_index))
+        self.monitor_combo.blockSignals(False)
+        if self.monitors:
+            self.load_current_monitor()
+        else:
+            self.disable_all_controls(_("No monitors detected."))
+            self.overview_label.setText(_("No monitors detected."))
+        self.sidebar.setCurrentRow(page)
+
     def _create_pages(self) -> None:
         pages = [
-            ("Resumen", self._page_overview()),
-            ("Imagen", self._page_image()),
+            (_("Overview"), self._page_overview()),
+            (_("Picture"), self._page_image()),
             ("Color", self._page_color()),
             ("Audio", self._page_audio()),
-            ("Entrada", self._page_input()),
-            ("Diagnóstico", self._page_diagnostics()),
+            (_("Input"), self._page_input()),
+            (_("Diagnostics"), self._page_diagnostics()),
         ]
 
         for title, widget in pages:
@@ -299,21 +386,21 @@ class MainWindow(QMainWindow):
     def _page_overview(self) -> QWidget:
         page, layout = self._page_wrapper(
             PageInfo(
-                "Resumen del monitor",
-                "Información básica detectada por ddcutil y estado de los backends.",
+                _("Monitor overview"),
+                _("Monitor information detected by ddcutil and backend status."),
             )
         )
 
-        group = QGroupBox("Monitor actual")
+        group = QGroupBox(_("Current monitor"))
         form = QFormLayout(group)
 
-        self.overview_label = QLabel("Sin monitor seleccionado.")
+        self.overview_label = QLabel(_("No monitor selected."))
         self.overview_label.setWordWrap(True)
 
         self.backend_label = QLabel("")
         self.backend_label.setWordWrap(True)
 
-        form.addRow("Información:", self.overview_label)
+        form.addRow(_("Information:"), self.overview_label)
         form.addRow("Backends:", self.backend_label)
 
         layout.addWidget(group)
@@ -323,21 +410,21 @@ class MainWindow(QMainWindow):
     def _page_image(self) -> QWidget:
         page, layout = self._page_wrapper(
             PageInfo(
-                "Imagen",
-                "Ajustes básicos de brillo y contraste.",
+                _("Picture"),
+                _("Basic brightness and contrast settings."),
             )
         )
 
-        group = QGroupBox("Controles de imagen")
+        group = QGroupBox(_("Picture controls"))
         group_layout = QVBoxLayout(group)
 
         self.brightness_control = ValueControl(
-            "Brillo",
+            _("Brightness"),
             self.apply_brightness,
             self.read_brightness,
         )
         self.contrast_control = ValueControl(
-            "Contraste",
+            _("Contrast"),
             self.apply_contrast,
             self.read_contrast,
         )
@@ -353,19 +440,19 @@ class MainWindow(QMainWindow):
         page, layout = self._page_wrapper(
             PageInfo(
                 "Color",
-                "Preset de temperatura de color y ganancias RGB, si el monitor las soporta.",
+                _("Color temperature preset and RGB gains, where supported by the monitor."),
             )
         )
 
-        preset_group = QGroupBox("Temperatura / preset de color")
+        preset_group = QGroupBox(_("Temperature / color preset"))
         preset_layout = QHBoxLayout(preset_group)
 
         self.color_preset_combo = QComboBox()
         for label, value in common_color_presets():
             self.color_preset_combo.addItem(f"{label} · 0x{value:02X}", value)
 
-        self.color_apply_button = QPushButton("Aplicar preset")
-        self.color_read_button = QPushButton("Leer")
+        self.color_apply_button = QPushButton(_("Apply preset"))
+        self.color_read_button = QPushButton(_("Read"))
         self.color_status_label = QLabel("")
 
         self.color_apply_button.clicked.connect(self.apply_color_preset)
@@ -376,12 +463,12 @@ class MainWindow(QMainWindow):
         preset_layout.addWidget(self.color_read_button)
         preset_layout.addWidget(self.color_status_label)
 
-        rgb_group = QGroupBox("Ganancias RGB")
+        rgb_group = QGroupBox(_("RGB gains"))
         rgb_layout = QVBoxLayout(rgb_group)
 
-        self.red_control = ValueControl("Rojo", self.apply_red, self.read_red)
-        self.green_control = ValueControl("Verde", self.apply_green, self.read_green)
-        self.blue_control = ValueControl("Azul", self.apply_blue, self.read_blue)
+        self.red_control = ValueControl(_("Red"), self.apply_red, self.read_red)
+        self.green_control = ValueControl(_("Green"), self.apply_green, self.read_green)
+        self.blue_control = ValueControl(_("Blue"), self.apply_blue, self.read_blue)
 
         rgb_layout.addWidget(self.red_control)
         rgb_layout.addWidget(self.green_control)
@@ -396,15 +483,15 @@ class MainWindow(QMainWindow):
         page, layout = self._page_wrapper(
             PageInfo(
                 "Audio",
-                "Volumen del altavoz/salida de audio del monitor, si está disponible.",
+                _("Monitor speaker/audio output volume, where supported."),
             )
         )
 
-        group = QGroupBox("Volumen")
+        group = QGroupBox(_("Volume"))
         group_layout = QVBoxLayout(group)
 
         self.volume_control = ValueControl(
-            "Volumen",
+            _("Volume"),
             self.apply_volume,
             self.read_volume,
         )
@@ -418,8 +505,10 @@ class MainWindow(QMainWindow):
     def _page_input(self) -> QWidget:
         page, layout = self._page_wrapper(
             PageInfo(
-                "Entrada de vídeo",
-                "Cambio de fuente de entrada. Úsalo con cuidado: si eliges una entrada sin señal puedes perder imagen.",
+                _("Video input"),
+                _(
+                    "Change the input source. Selecting an input without a signal may leave the screen blank."
+                ),
             )
         )
 
@@ -430,8 +519,8 @@ class MainWindow(QMainWindow):
         for label, value in unique_input_sources():
             self.input_combo.addItem(f"{label} · 0x{value:02X}", value)
 
-        self.input_apply_button = QPushButton("Cambiar entrada")
-        self.input_read_button = QPushButton("Leer entrada actual")
+        self.input_apply_button = QPushButton(_("Change input"))
+        self.input_read_button = QPushButton(_("Read current input"))
         self.input_status_label = QLabel("")
         self.input_status_label.setWordWrap(True)
 
@@ -445,9 +534,9 @@ class MainWindow(QMainWindow):
         self.input_apply_button.clicked.connect(self.apply_input_source)
         self.input_read_button.clicked.connect(self.read_input_source)
 
-        form.addRow("Entrada:", self.input_combo)
+        form.addRow(_("Input:"), self.input_combo)
         form.addRow("", buttons)
-        form.addRow("Estado:", self.input_status_label)
+        form.addRow(_("Status:"), self.input_status_label)
 
         layout.addWidget(group)
         layout.addStretch(1)
@@ -456,15 +545,15 @@ class MainWindow(QMainWindow):
     def _page_diagnostics(self) -> QWidget:
         page, layout = self._page_wrapper(
             PageInfo(
-                "Diagnóstico",
-                "Salida cruda de ddcutil capabilities y getvcp all para depuración.",
+                _("Diagnostics"),
+                _("Raw ddcutil capabilities and getvcp all output for troubleshooting."),
             )
         )
 
         buttons = QHBoxLayout()
-        self.capabilities_button = QPushButton("Leer capabilities")
-        self.getvcp_all_button = QPushButton("Leer getvcp all")
-        self.clear_diag_button = QPushButton("Limpiar")
+        self.capabilities_button = QPushButton(_("Read capabilities"))
+        self.getvcp_all_button = QPushButton(_("Read getvcp all"))
+        self.clear_diag_button = QPushButton(_("Clear"))
 
         self.capabilities_button.clicked.connect(self.read_capabilities)
         self.getvcp_all_button.clicked.connect(self.read_getvcp_all)
@@ -519,7 +608,7 @@ class MainWindow(QMainWindow):
         except PlasmaDDCError as exc:
             self.show_error(str(exc))
         except Exception as exc:
-            self.show_error(f"Error inesperado: {exc}")
+            self.show_error(_("Unexpected error: {exc}").format(exc=exc))
 
     def select_combo_by_value(self, combo: QComboBox, value: int) -> None:
         for i in range(combo.count()):
@@ -547,10 +636,10 @@ class MainWindow(QMainWindow):
                 self.monitor_combo.setCurrentIndex(0)
                 self.load_current_monitor()
             else:
-                self.disable_all_controls("No se han detectado monitores.")
-                self.overview_label.setText("No se han detectado monitores.")
+                self.disable_all_controls(_("No monitors detected."))
+                self.overview_label.setText(_("No monitors detected."))
 
-        self.run_safe(op, "Monitores actualizados.")
+        self.run_safe(op, _("Monitor list refreshed."))
 
     def load_current_monitor(self) -> None:
         if not self.monitors:
@@ -561,7 +650,7 @@ class MainWindow(QMainWindow):
             self.current_profile = self.backend.build_monitor_profile(index)
             self.update_from_profile()
 
-        self.run_safe(op, "Valores leídos.")
+        self.run_safe(op, _("Values read."))
 
     def disable_all_controls(self, reason: str) -> None:
         for control in (
@@ -594,13 +683,19 @@ class MainWindow(QMainWindow):
         self.overview_label.setText(
             "\n".join(
                 [
-                    f"Etiqueta: {monitor.label}",
+                    _("Label: {monitor_label}").format(monitor_label=monitor.label),
                     f"Display: {monitor.display_number}",
                     f"Bus: {monitor.bus_path or monitor.bus_number}",
-                    f"Conector DRM: {monitor.drm_connector}",
-                    f"Fabricante: {monitor.manufacturer_id}",
-                    f"Modelo: {monitor.model_name}",
-                    f"Serie: {monitor.serial_number}",
+                    _("DRM connector: {monitor_drm_connector}").format(
+                        monitor_drm_connector=monitor.drm_connector
+                    ),
+                    _("Manufacturer: {monitor_manufacturer_id}").format(
+                        monitor_manufacturer_id=monitor.manufacturer_id
+                    ),
+                    _("Model: {monitor_model_name}").format(monitor_model_name=monitor.model_name),
+                    _("Serial: {monitor_serial_number}").format(
+                        monitor_serial_number=monitor.serial_number
+                    ),
                 ]
             )
         )
@@ -608,10 +703,16 @@ class MainWindow(QMainWindow):
         self.backend_label.setText(
             "\n".join(
                 [
-                    f"ddcutil disponible: {self.backend.ddcutil_available()}",
-                    f"monitorcontrol disponible: {self.backend.monitorcontrol_available()}",
-                    f"monitorcontrol fiable para VCP básicos: {self.backend.monitorcontrol_reliable(monitor.index)}",
-                    "Backend activo para controles: ddcutil",
+                    _("ddcutil available: {self_backend_ddcutil_available}").format(
+                        self_backend_ddcutil_available=self.backend.ddcutil_available()
+                    ),
+                    _("monitorcontrol available: {value}").format(
+                        value=self.backend.monitorcontrol_available()
+                    ),
+                    _("monitorcontrol reliable for basic VCP controls: {value}").format(
+                        value=self.backend.monitorcontrol_reliable(monitor.index)
+                    ),
+                    _("Active control backend: ddcutil"),
                 ]
             )
         )
@@ -619,32 +720,32 @@ class MainWindow(QMainWindow):
         self.update_value_control(
             self.brightness_control,
             "brightness",
-            "Brillo no disponible.",
+            _("Brightness unavailable."),
         )
         self.update_value_control(
             self.contrast_control,
             "contrast",
-            "Contraste no disponible.",
+            _("Contrast unavailable."),
         )
         self.update_value_control(
             self.volume_control,
             "volume",
-            "Volumen no disponible.",
+            _("Volume unavailable."),
         )
         self.update_value_control(
             self.red_control,
             "red_gain",
-            "Rojo no disponible.",
+            _("Red unavailable."),
         )
         self.update_value_control(
             self.green_control,
             "green_gain",
-            "Verde no disponible.",
+            _("Green unavailable."),
         )
         self.update_value_control(
             self.blue_control,
             "blue_gain",
-            "Azul no disponible.",
+            _("Blue unavailable."),
         )
 
         self.update_color_preset()
@@ -662,7 +763,7 @@ class MainWindow(QMainWindow):
 
         if profile.errors:
             diag_parts.append("")
-            diag_parts.append("===== errores/no disponibles =====")
+            diag_parts.append(_("===== errors/unavailable controls ====="))
             for key, value in profile.errors.items():
                 diag_parts.append(f"{key}: {value}")
 
@@ -670,7 +771,7 @@ class MainWindow(QMainWindow):
 
     def update_value_control(self, control: ValueControl, key: str, fallback: str) -> None:
         if self.current_profile is None:
-            control.set_unavailable("Sin perfil cargado.")
+            control.set_unavailable(_("No profile loaded."))
             return
 
         value = self.current_profile.values.get(key)
@@ -693,7 +794,7 @@ class MainWindow(QMainWindow):
             self.color_apply_button.setEnabled(False)
             self.color_read_button.setEnabled(False)
             self.color_status_label.setText(
-                self.current_profile.errors.get("color_preset", "No disponible.")
+                self.current_profile.errors.get("color_preset", _("Unavailable."))
             )
             return
 
@@ -718,7 +819,7 @@ class MainWindow(QMainWindow):
             self.input_apply_button.setEnabled(False)
             self.input_read_button.setEnabled(False)
             self.input_status_label.setText(
-                self.current_profile.errors.get("input_source", "No disponible.")
+                self.current_profile.errors.get("input_source", _("Unavailable."))
             )
             return
 
@@ -737,22 +838,52 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def read_brightness(self) -> None:
-        self.run_safe(lambda: self.brightness_control.set_value(self.backend.get_brightness(self.current_monitor_index())), "Brillo leído.")
+        self.run_safe(
+            lambda: self.brightness_control.set_value(
+                self.backend.get_brightness(self.current_monitor_index())
+            ),
+            _("Brightness read."),
+        )
 
     def read_contrast(self) -> None:
-        self.run_safe(lambda: self.contrast_control.set_value(self.backend.get_contrast(self.current_monitor_index())), "Contraste leído.")
+        self.run_safe(
+            lambda: self.contrast_control.set_value(
+                self.backend.get_contrast(self.current_monitor_index())
+            ),
+            _("Contrast read."),
+        )
 
     def read_volume(self) -> None:
-        self.run_safe(lambda: self.volume_control.set_value(self.backend.get_volume(self.current_monitor_index())), "Volumen leído.")
+        self.run_safe(
+            lambda: self.volume_control.set_value(
+                self.backend.get_volume(self.current_monitor_index())
+            ),
+            _("Volume read."),
+        )
 
     def read_red(self) -> None:
-        self.run_safe(lambda: self.red_control.set_value(self.backend.get_rgb_gain(self.current_monitor_index(), "red")), "Rojo leído.")
+        self.run_safe(
+            lambda: self.red_control.set_value(
+                self.backend.get_rgb_gain(self.current_monitor_index(), "red")
+            ),
+            _("Red gain read."),
+        )
 
     def read_green(self) -> None:
-        self.run_safe(lambda: self.green_control.set_value(self.backend.get_rgb_gain(self.current_monitor_index(), "green")), "Verde leído.")
+        self.run_safe(
+            lambda: self.green_control.set_value(
+                self.backend.get_rgb_gain(self.current_monitor_index(), "green")
+            ),
+            _("Green gain read."),
+        )
 
     def read_blue(self) -> None:
-        self.run_safe(lambda: self.blue_control.set_value(self.backend.get_rgb_gain(self.current_monitor_index(), "blue")), "Azul leído.")
+        self.run_safe(
+            lambda: self.blue_control.set_value(
+                self.backend.get_rgb_gain(self.current_monitor_index(), "blue")
+            ),
+            _("Blue gain read."),
+        )
 
     def read_color_preset(self) -> None:
         def op() -> None:
@@ -761,7 +892,7 @@ class MainWindow(QMainWindow):
                 self.select_combo_by_value(self.color_preset_combo, value.selector)
             self.color_status_label.setText(value.as_text())
 
-        self.run_safe(op, "Preset de color leído.")
+        self.run_safe(op, _("Color preset read."))
 
     def read_input_source(self) -> None:
         def op() -> None:
@@ -770,21 +901,21 @@ class MainWindow(QMainWindow):
                 self.select_combo_by_value(self.input_combo, value.selector)
             self.input_status_label.setText(value.as_text())
 
-        self.run_safe(op, "Entrada leída.")
+        self.run_safe(op, _("Input read."))
 
     def read_capabilities(self) -> None:
         def op() -> None:
             text = self.backend.get_capabilities_text(self.current_monitor_index())
             self.diagnostics_text.setPlainText(text)
 
-        self.run_safe(op, "Capabilities leído.")
+        self.run_safe(op, _("Capabilities read."))
 
     def read_getvcp_all(self) -> None:
         def op() -> None:
             text = self.backend.get_all_vcps_text(self.current_monitor_index())
             self.diagnostics_text.setPlainText(text)
 
-        self.run_safe(op, "getvcp all leído.")
+        self.run_safe(op, _("getvcp all read."))
 
     # ------------------------------------------------------------------
     # Escrituras
@@ -793,37 +924,37 @@ class MainWindow(QMainWindow):
     def apply_brightness(self, value: int) -> None:
         self.run_safe(
             lambda: self.backend.set_brightness(self.current_monitor_index(), value),
-            f"Brillo aplicado: {value}",
+            _("Brightness applied: {value}").format(value=value),
         )
 
     def apply_contrast(self, value: int) -> None:
         self.run_safe(
             lambda: self.backend.set_contrast(self.current_monitor_index(), value),
-            f"Contraste aplicado: {value}",
+            _("Contrast applied: {value}").format(value=value),
         )
 
     def apply_volume(self, value: int) -> None:
         self.run_safe(
             lambda: self.backend.set_volume(self.current_monitor_index(), value),
-            f"Volumen aplicado: {value}",
+            _("Volume applied: {value}").format(value=value),
         )
 
     def apply_red(self, value: int) -> None:
         self.run_safe(
             lambda: self.backend.set_rgb_gain(self.current_monitor_index(), "red", value),
-            f"Rojo aplicado: {value}",
+            _("Red gain applied: {value}").format(value=value),
         )
 
     def apply_green(self, value: int) -> None:
         self.run_safe(
             lambda: self.backend.set_rgb_gain(self.current_monitor_index(), "green", value),
-            f"Verde aplicado: {value}",
+            _("Green gain applied: {value}").format(value=value),
         )
 
     def apply_blue(self, value: int) -> None:
         self.run_safe(
             lambda: self.backend.set_rgb_gain(self.current_monitor_index(), "blue", value),
-            f"Azul aplicado: {value}",
+            _("Blue gain applied: {value}").format(value=value),
         )
 
     def apply_color_preset(self) -> None:
@@ -831,7 +962,9 @@ class MainWindow(QMainWindow):
 
         self.run_safe(
             lambda: self.backend.set_color_preset(self.current_monitor_index(), value),
-            f"Preset de color aplicado: {color_preset_label(value)}",
+            _("Color preset applied: {color_preset_label_value}").format(
+                color_preset_label_value=color_preset_label(value)
+            ),
         )
 
         self.read_color_preset()
@@ -844,23 +977,21 @@ class MainWindow(QMainWindow):
             self,
             APP_NAME,
             (
-                f"Vas a cambiar la entrada del monitor a:\n\n"
-                f"{label} · 0x{value:02X}\n\n"
-                "Si esa entrada no tiene señal, podrías perder imagen hasta volver "
-                "a cambiarla desde los botones físicos del monitor.\n\n"
-                "¿Quieres continuar?"
+                _(
+                    "You are about to change the monitor input to:\n\n{label} · 0x{value:02X}\n\nIf that input has no signal, the screen may go blank until you switch back using the physical buttons on the monitor.\n\nDo you want to continue?"
+                ).format(label=label, value=value)
             ),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
 
         if answer != QMessageBox.Yes:
-            self.info("Cambio de entrada cancelado.")
+            self.info(_("Input change cancelled."))
             return
 
         self.run_safe(
             lambda: self.backend.set_input_source(self.current_monitor_index(), value),
-            f"Entrada aplicada: {label}",
+            _("Input applied: {label}").format(label=label),
         )
 
 
