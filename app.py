@@ -199,6 +199,13 @@ class ValueControl(QWidget):
         self.spin.blockSignals(False)
 
         self.setEnabled(True)
+        # Once detected, a single successful Read must unlock the editors.
+        # Qt remembers child widgets explicitly disabled while waiting for a
+        # reading; enabling their parent alone does not re-enable them.
+        self.slider.setEnabled(True)
+        self.spin.setEnabled(True)
+        self.apply_button.setEnabled(True)
+        self.read_button.setEnabled(True)
 
         if value.name:
             self.status_label.setText(f"{value.name} · {current}/{maximum} · {value.backend}")

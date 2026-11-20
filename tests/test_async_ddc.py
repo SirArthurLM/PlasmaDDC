@@ -162,5 +162,72 @@ class AsyncDDCChecks(unittest.TestCase):
         self.backend.build_monitor_profile.assert_not_called()
 
 
+    def test_single_reads_unlock_editors_and_apply_buttons(self):
+        """Real VCP values unlock editing; the simulated backend is not written."""
+        self.window._detection_finished([self.monitor])
+        self.window._hardware_authorized = True
+
+        controls = (
+            ("brightness", "get_brightness", "read_brightness", 0x10, 85),
+            ("contrast", "get_contrast", "read_contrast", 0x12, 60),
+            ("volume", "get_volume", "read_volume", 0x62, 42),
+        )
+        for control_name, getter_name, read_name, vcp, current in controls:
+            control = getattr(self.window, f"{control_name}_control")
+            with self.subTest(control=control_name):
+                self.assertTrue(control.read_button.isEnabled())
+                self.assertFalse(control.slider.isEnabled())
+                self.assertFalse(control.spin.isEnabled())
+                self.assertFalse(control.apply_button.isEnabled())
+
+                getattr(self.backend, getter_name).return_value = VCPValue(
+                    vcp, control_name, current, 100
+                )
+                getattr(self.window, read_name)()
+                self.wait_until(lambda: not self.window._ddc_busy)
+
+                self.assertEqual(control.value(), current)
+                self.assertTrue(control.slider.isEnabled())
+                self.assertTrue(control.spin.isEnabled())
+                self.assertTrue(control.apply_button.isEnabled())
+                self.assertTrue(control.read_button.isEnabled())
+
+        self.backend.set_brightness.assert_not_called()
+        self.backend.set_contrast.assert_not_called()
+        self.backend.set_volume.assert_not_called()
+
+    def test_undetected_controls_remain_locked_after_other_read(self):
+        self.window._detection_finished([self.monitor])
+        self.window._hardware_authorized = True
+        self.backend.get_brightness.return_value = VCPValue(0x10, "Brightness", 85, 100)
+        self.window.read_brightness()
+        self.wait_until(lambda: not self.window._ddc_busy)
+
+        for control in (self.window.contrast_control, self.window.volume_control):
+            self.assertFalse(control.slider.isEnabled())
+            self.assertFalse(control.spin.isEnabled())
+            self.assertFalse(control.apply_button.isEnabled())
+            self.assertTrue(control.read_button.isEnabled())
+
+    def test_language_switch_keeps_editors_unlocked_without_hardware_io(self):
+        self.window._detection_finished([self.monitor])
+        self.window._hardware_authorized = True
+        self.backend.get_brightness.return_value = VCPValue(0x10, "Brightness", 85, 100)
+        self.window.read_brightness()
+        self.wait_until(lambda: not self.window._ddc_busy)
+        self.backend.reset_mock()
+
+        self.window.set_language_preference("es")
+        self.window.set_language_preference("en")
+
+        self.assertTrue(self.window.brightness_control.slider.isEnabled())
+        self.assertTrue(self.window.brightness_control.spin.isEnabled())
+        self.assertTrue(self.window.brightness_control.apply_button.isEnabled())
+        self.assertEqual(self.window.brightness_control.value(), 85)
+        self.backend.get_brightness.assert_not_called()
+        self.backend.refresh_monitors.assert_not_called()
+
+
+
 if __name__ == "__main__":
     unittest.main()
