@@ -121,5 +121,16 @@
   "volume": "volumen",
   "{name} must be between 0 and 100. Received: {value}": "{name} debe estar entre 0 y 100. Valor recibido: {value}",
   "{self_code_hex}: no parsed value": "{self_code_hex}: sin valor interpretado",
-  "{self_code_hex}: unsupported": "{self_code_hex}: no soportado"
+  "{self_code_hex}: unsupported": "{self_code_hex}: no soportado",
+  "Detect a monitor before using DDC/CI controls.": "Detecta un monitor antes de utilizar los controles DDC/CI.",
+  "Ready. No monitor hardware has been queried.": "Preparado. No se ha consultado el hardware del monitor.",
+  "DDC/CI communicates through the graphics driver. On some systems (including certain AMD/DisplayPort combinations) these operations may freeze the desktop. Continue with monitor detection?": "DDC/CI se comunica mediante el controlador gráfico. En algunos sistemas (incluidas ciertas combinaciones AMD/DisplayPort) estas operaciones pueden bloquear el escritorio. ¿Continuar con la detección de monitores?",
+  "Monitor detected. Values not read yet.": "Monitor detectado. Los valores todavía no se han leído.",
+  "Use Read to query an individual control.": "Pulsa Leer para consultar un control individual.",
+  "Not checked automatically": "No comprobado automáticamente",
+  "Bulk read disabled; use each control's Read button.": "Lectura masiva desactivada; usa el botón Leer de cada control.",
+  "Another DDC/CI operation is still running.": "Todavía hay otra operación DDC/CI en curso.",
+  "Detect a monitor first.": "Primero detecta un monitor.",
+  "DDC/CI operation in progress…": "Operación DDC/CI en curso…",
+  "Bulk diagnostics temporarily disabled.": "Diagnósticos masivos desactivados temporalmente."
 }

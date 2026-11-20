@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
-from PySide6.QtCore import QLocale, QSettings, Qt
+from PySide6.QtCore import QObject, QLocale, QRunnable, QSettings, QThreadPool, Qt, Signal, Slot
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
@@ -47,6 +47,29 @@ from backend import (
 
 
 APP_NAME = "PlasmaDDC"
+
+
+class DDCJobSignals(QObject):
+    """Delivers the worker's result to the GUI thread via a queued signal."""
+
+    completed = Signal(object, object)
+
+
+class DDCJob(QRunnable):
+    """Run backend-only work. This class must never access a Qt widget."""
+
+    def __init__(self, operation: Callable[[], Any]) -> None:
+        super().__init__()
+        self.setAutoDelete(False)
+        self.operation = operation
+        self.signals = DDCJobSignals()
+
+    def run(self) -> None:
+        try:
+            value = self.operation()
+            self.signals.completed.emit(value, None)
+        except Exception as exc:
+            self.signals.completed.emit(None, str(exc))
 
 
 class LanguagePreferencesDialog(QDialog):
@@ -207,13 +230,23 @@ class MainWindow(QMainWindow):
         self.backend = PlasmaDDCBackend()
         self.monitors = []
         self.current_profile = None
+        self._hardware_authorized = False
+        self._ddc_busy = False
+        self._ddc_job: DDCJob | None = None
+        self._ddc_callback: Callable[[Any], None] | None = None
+        self._ddc_success = ""
+        self._profile_cache = {}
 
         self.setWindowTitle(APP_NAME)
         self.resize(1040, 720)
 
         self._build_ui()
         self._build_menu()
-        self.refresh_monitors()
+        # No hardware access at application startup. Even detection can be
+        # unsafe on certain GPU / DisplayPort driver combinations.
+        self.disable_all_controls(_("Detect a monitor before using DDC/CI controls."))
+        self.reload_button.setEnabled(False)
+        self.statusBar().showMessage(_("Ready. No monitor hardware has been queried."))
 
     # ------------------------------------------------------------------
     # UI base
@@ -266,10 +299,14 @@ class MainWindow(QMainWindow):
 
         self.monitor_combo = QComboBox()
         self.monitor_combo.setMinimumWidth(340)
-        self.monitor_combo.currentIndexChanged.connect(self.load_current_monitor)
+        # Changing the selected monitor only changes the local UI. Never
+        # communicate with monitor hardware from this signal.
+        self.monitor_combo.currentIndexChanged.connect(self.select_current_monitor)
 
         self.refresh_button = QPushButton(_("Detect monitors"))
         self.reload_button = QPushButton(_("Read values"))
+        self.reload_button.setToolTip(_("Bulk read disabled; use each control's Read button."))
+        self.reload_button.setEnabled(False)
         self.refresh_button.clicked.connect(self.refresh_monitors)
         self.reload_button.clicked.connect(self.load_current_monitor)
 
@@ -284,6 +321,7 @@ class MainWindow(QMainWindow):
     def _build_menu(self) -> None:
         app_menu = self.menuBar().addMenu("PlasmaDDC")
         refresh_action = QAction(_("Read values"), app_menu)
+        refresh_action.setEnabled(False)  # Bulk read intentionally disabled.
         refresh_action.triggered.connect(self.load_current_monitor)
 
         detect_action = QAction(_("Detect monitors"), app_menu)
@@ -309,14 +347,14 @@ class MainWindow(QMainWindow):
         dialog.deleteLater()
 
     def set_language_preference(self, preference: str) -> None:
-        if preference == language_manager.preference:
+        if self._ddc_busy or preference == language_manager.preference:
             return
         language_manager.configure(preference, QLocale.system().name())
         self.settings.setValue("language", language_manager.preference)
         self.settings.sync()
 
-        # Rebuild translated widgets without changing hardware settings. Preserve
-        # the selected monitor and page, and re-read localized status/errors.
+        # Rebuild translated widgets using cached data only. Language changes
+        # must never query hardware, even for status messages.
         page = self.sidebar.currentRow()
         monitor_index = self.current_monitor_index()
         old_central = self.takeCentralWidget()
@@ -334,8 +372,10 @@ class MainWindow(QMainWindow):
             self.monitor_combo.addItem(monitor.label, monitor.index)
         self.monitor_combo.setCurrentIndex(self.monitor_combo.findData(monitor_index))
         self.monitor_combo.blockSignals(False)
+        # The eight-VCP bulk read is intentionally disabled in this safety stage.
+        self.reload_button.setEnabled(False)
         if self.monitors:
-            self.load_current_monitor()
+            self.select_current_monitor()
         else:
             self.disable_all_controls(_("No monitors detected."))
             self.overview_label.setText(_("No monitors detected."))
@@ -555,6 +595,10 @@ class MainWindow(QMainWindow):
         self.getvcp_all_button = QPushButton(_("Read getvcp all"))
         self.clear_diag_button = QPushButton(_("Clear"))
 
+        self.capabilities_button.setEnabled(False)
+        self.getvcp_all_button.setEnabled(False)
+        self.capabilities_button.setToolTip(_("Bulk diagnostics temporarily disabled."))
+        self.getvcp_all_button.setToolTip(_("Bulk diagnostics temporarily disabled."))
         self.capabilities_button.clicked.connect(self.read_capabilities)
         self.getvcp_all_button.clicked.connect(self.read_getvcp_all)
         self.clear_diag_button.clicked.connect(lambda: self.diagnostics_text.clear())
@@ -584,12 +628,16 @@ class MainWindow(QMainWindow):
         return int(data)
 
     def set_busy(self, busy: bool, message: str = "") -> None:
-        self.setEnabled(not busy)
-        QApplication.setOverrideCursor(Qt.WaitCursor if busy else Qt.ArrowCursor)
-
-        if not busy:
-            QApplication.restoreOverrideCursor()
-
+        """Keep window responsive; prevent UI changes while an operation runs."""
+        self._ddc_busy = busy
+        central = self.centralWidget()
+        if central is not None:
+            central.setEnabled(not busy)
+        self.menuBar().setEnabled(not busy)
+        if busy:
+            self.setCursor(Qt.WaitCursor)
+        else:
+            self.unsetCursor()
         if message:
             self.statusBar().showMessage(message)
 
@@ -600,15 +648,75 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(message, 10000)
         QMessageBox.warning(self, APP_NAME, message)
 
-    def run_safe(self, operation: Callable[[], None], success: str | None = None) -> None:
+    def _submit_ddc(
+        self,
+        operation: Callable[[], Any],
+        on_result: Callable[[Any], None],
+        success: str,
+        *,
+        needs_monitor: bool = True,
+    ) -> bool:
+        """Serialize DDC work off the GUI thread; never bypass explicit consent.
+
+        A responsive GUI does NOT make the kernel driver safe. The user must
+        still explicitly authorize hardware queries, and only one runs at once.
+        """
+        if self._ddc_busy:
+            self.info(_("Another DDC/CI operation is still running."))
+            return False
+        if needs_monitor and not self.monitors:
+            self.info(_("Detect a monitor first."))
+            return False
+        if not self.authorize_hardware_access():
+            return False
+
+        job = DDCJob(operation)
+        self._ddc_job = job
+        self._ddc_callback = on_result
+        self._ddc_success = success
+        job.signals.completed.connect(self._ddc_completed, Qt.QueuedConnection)
+        self.set_busy(True, _("DDC/CI operation in progress…"))
         try:
-            operation()
+            QThreadPool.globalInstance().start(job)
+        except Exception:
+            self._ddc_job = None
+            self._ddc_callback = None
+            self.set_busy(False)
+            raise
+        return True
+
+    @Slot(object, object)
+    def _ddc_completed(self, result: Any, error: object) -> None:
+        """All GUI updates happen on this slot, not in the worker thread."""
+        callback = self._ddc_callback
+        success = self._ddc_success
+        self._ddc_callback = None
+        self._ddc_success = ""
+        self._ddc_job = None
+        self.set_busy(False)
+        if error is not None:
+            self.show_error(str(error))
+            return
+        try:
+            if callback is not None:
+                callback(result)
             if success:
                 self.info(success)
-        except PlasmaDDCError as exc:
-            self.show_error(str(exc))
         except Exception as exc:
             self.show_error(_("Unexpected error: {exc}").format(exc=exc))
+
+    def _remember_value(self, index: int, key: str, value: VCPValue) -> None:
+        """Cache explicit reads for language switching without new DDC I/O."""
+        profile = self._profile_cache.get(index)
+        if profile is None:
+            monitor = next(m for m in self.monitors if m.index == index)
+            from backend import MonitorProfile
+            profile = MonitorProfile(monitor)
+            self._profile_cache[index] = profile
+        profile.values[key] = value
+        if index == self.current_monitor_index():
+            self.current_profile = profile
+            self.update_from_profile()
 
     def select_combo_by_value(self, combo: QComboBox, value: int) -> None:
         for i in range(combo.count()):
@@ -620,39 +728,90 @@ class MainWindow(QMainWindow):
     # Carga de monitores y perfil
     # ------------------------------------------------------------------
 
+    def authorize_hardware_access(self) -> bool:
+        """Require explicit consent before any DDC/CI operation this session."""
+        if self._hardware_authorized:
+            return True
+        answer = QMessageBox.warning(
+            self,
+            APP_NAME,
+            _(
+                "DDC/CI communicates through the graphics driver. On some systems "
+                "(including certain AMD/DisplayPort combinations) these operations "
+                "may freeze the desktop. Continue with monitor detection?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer == QMessageBox.Yes:
+            self._hardware_authorized = True
+            return True
+        return False
+
     def refresh_monitors(self) -> None:
-        def op() -> None:
-            self.monitors = self.backend.refresh_monitors()
+        """Only detect on explicit click, in a worker, never at startup."""
+        self._submit_ddc(
+            self.backend.refresh_monitors,
+            self._detection_finished,
+            _("Monitor list refreshed."),
+            needs_monitor=False,
+        )
 
-            self.monitor_combo.blockSignals(True)
+    def _detection_finished(self, monitors: Any) -> None:
+        self.monitors = list(monitors)
+        self._profile_cache.clear()
+        self.current_profile = None
+        self.monitor_combo.blockSignals(True)
+        try:
             self.monitor_combo.clear()
-
             for monitor in self.monitors:
                 self.monitor_combo.addItem(monitor.label, monitor.index)
-
-            self.monitor_combo.blockSignals(False)
-
             if self.monitors:
                 self.monitor_combo.setCurrentIndex(0)
-                self.load_current_monitor()
-            else:
-                self.disable_all_controls(_("No monitors detected."))
-                self.overview_label.setText(_("No monitors detected."))
+        finally:
+            self.monitor_combo.blockSignals(False)
+        # No follow-up I2C reads after detection.
+        self.reload_button.setEnabled(False)
+        self.select_current_monitor()
 
-        self.run_safe(op, _("Monitor list refreshed."))
+    def select_current_monitor(self, _unused: int = -1) -> None:
+        """Update UI from cached data; never contact the monitor."""
+        if not self.monitors:
+            self.current_profile = None
+            self.disable_all_controls(_("No monitors detected."))
+            self.overview_label.setText(_("No monitors detected."))
+            return
+        index = self.current_monitor_index()
+        monitor = next((m for m in self.monitors if m.index == index), None)
+        if monitor is None:
+            self.current_profile = None
+            self.disable_all_controls(_("No monitor selected."))
+            return
+        self.current_profile = self._profile_cache.get(index)
+        if self.current_profile is not None:
+            self.update_from_profile()
+            return
+        self.overview_label.setText(
+            "\n".join(
+                [
+                    _("Label: {monitor_label}").format(monitor_label=monitor.label),
+                    f"Display: {monitor.display_number}",
+                    f"Bus: {monitor.bus_path or monitor.bus_number}",
+                    _("Model: {monitor_model_name}").format(
+                        monitor_model_name=monitor.model_name
+                    ),
+                ]
+            )
+        )
+        self.backend_label.setText(_("Monitor detected. Values not read yet."))
+        self.disable_all_controls(_("Use Read to query an individual control."), allow_read=True)
+        self.diagnostics_text.clear()
 
     def load_current_monitor(self) -> None:
-        if not self.monitors:
-            return
+        """Bulk reads are deliberately unavailable while investigating AMD hangs."""
+        self.info(_("Bulk read disabled; use each control's Read button."))
 
-        def op() -> None:
-            index = self.current_monitor_index()
-            self.current_profile = self.backend.build_monitor_profile(index)
-            self.update_from_profile()
-
-        self.run_safe(op, _("Values read."))
-
-    def disable_all_controls(self, reason: str) -> None:
+    def disable_all_controls(self, reason: str, *, allow_read: bool = False) -> None:
         for control in (
             self.brightness_control,
             self.contrast_control,
@@ -662,15 +821,21 @@ class MainWindow(QMainWindow):
             self.blue_control,
         ):
             control.set_unavailable(reason)
+            if allow_read:
+                control.setEnabled(True)
+                control.slider.setEnabled(False)
+                control.spin.setEnabled(False)
+                control.apply_button.setEnabled(False)
+                control.read_button.setEnabled(True)
 
         self.color_preset_combo.setEnabled(False)
         self.color_apply_button.setEnabled(False)
-        self.color_read_button.setEnabled(False)
+        self.color_read_button.setEnabled(allow_read)
         self.color_status_label.setText(reason)
 
         self.input_combo.setEnabled(False)
         self.input_apply_button.setEnabled(False)
-        self.input_read_button.setEnabled(False)
+        self.input_read_button.setEnabled(allow_read)
         self.input_status_label.setText(reason)
 
     def update_from_profile(self) -> None:
@@ -710,7 +875,7 @@ class MainWindow(QMainWindow):
                         value=self.backend.monitorcontrol_available()
                     ),
                     _("monitorcontrol reliable for basic VCP controls: {value}").format(
-                        value=self.backend.monitorcontrol_reliable(monitor.index)
+                        value=_("Not checked automatically")
                     ),
                     _("Active control backend: ddcutil"),
                 ]
@@ -782,6 +947,12 @@ class MainWindow(QMainWindow):
 
         reason = self.current_profile.errors.get(key, fallback)
         control.set_unavailable(reason)
+        # Even when this specific VCP has not been read, allow an explicit Read.
+        control.setEnabled(True)
+        control.slider.setEnabled(False)
+        control.spin.setEnabled(False)
+        control.apply_button.setEnabled(False)
+        control.read_button.setEnabled(True)
 
     def update_color_preset(self) -> None:
         if self.current_profile is None:
@@ -792,7 +963,7 @@ class MainWindow(QMainWindow):
         if value is None:
             self.color_preset_combo.setEnabled(False)
             self.color_apply_button.setEnabled(False)
-            self.color_read_button.setEnabled(False)
+            self.color_read_button.setEnabled(True)
             self.color_status_label.setText(
                 self.current_profile.errors.get("color_preset", _("Unavailable."))
             )
@@ -817,7 +988,7 @@ class MainWindow(QMainWindow):
         if value is None:
             self.input_combo.setEnabled(False)
             self.input_apply_button.setEnabled(False)
-            self.input_read_button.setEnabled(False)
+            self.input_read_button.setEnabled(True)
             self.input_status_label.setText(
                 self.current_profile.errors.get("input_source", _("Unavailable."))
             )
@@ -834,163 +1005,129 @@ class MainWindow(QMainWindow):
             self.input_status_label.setText(value.as_text())
 
     # ------------------------------------------------------------------
-    # Lecturas individuales
+    # Explicit, serialized DDC/CI operations (never manipulate Qt from worker)
     # ------------------------------------------------------------------
 
-    def read_brightness(self) -> None:
-        self.run_safe(
-            lambda: self.brightness_control.set_value(
-                self.backend.get_brightness(self.current_monitor_index())
-            ),
-            _("Brightness read."),
+    def _read_value(self, key: str, reader: Callable[[int], VCPValue], message: str) -> None:
+        index = self.current_monitor_index()
+        self._submit_ddc(
+            lambda: reader(index),
+            lambda value: self._remember_value(index, key, value),
+            message,
         )
+
+    def read_brightness(self) -> None:
+        self._read_value("brightness", self.backend.get_brightness, _("Brightness read."))
 
     def read_contrast(self) -> None:
-        self.run_safe(
-            lambda: self.contrast_control.set_value(
-                self.backend.get_contrast(self.current_monitor_index())
-            ),
-            _("Contrast read."),
-        )
+        self._read_value("contrast", self.backend.get_contrast, _("Contrast read."))
 
     def read_volume(self) -> None:
-        self.run_safe(
-            lambda: self.volume_control.set_value(
-                self.backend.get_volume(self.current_monitor_index())
-            ),
-            _("Volume read."),
-        )
+        self._read_value("volume", self.backend.get_volume, _("Volume read."))
 
     def read_red(self) -> None:
-        self.run_safe(
-            lambda: self.red_control.set_value(
-                self.backend.get_rgb_gain(self.current_monitor_index(), "red")
-            ),
-            _("Red gain read."),
+        self._read_value(
+            "red_gain", lambda index: self.backend.get_rgb_gain(index, "red"), _("Red gain read.")
         )
 
     def read_green(self) -> None:
-        self.run_safe(
-            lambda: self.green_control.set_value(
-                self.backend.get_rgb_gain(self.current_monitor_index(), "green")
-            ),
-            _("Green gain read."),
+        self._read_value(
+            "green_gain", lambda index: self.backend.get_rgb_gain(index, "green"), _("Green gain read.")
         )
 
     def read_blue(self) -> None:
-        self.run_safe(
-            lambda: self.blue_control.set_value(
-                self.backend.get_rgb_gain(self.current_monitor_index(), "blue")
-            ),
-            _("Blue gain read."),
+        self._read_value(
+            "blue_gain", lambda index: self.backend.get_rgb_gain(index, "blue"), _("Blue gain read.")
         )
 
     def read_color_preset(self) -> None:
-        def op() -> None:
-            value = self.backend.get_color_preset(self.current_monitor_index())
-            if value.selector is not None:
-                self.select_combo_by_value(self.color_preset_combo, value.selector)
-            self.color_status_label.setText(value.as_text())
-
-        self.run_safe(op, _("Color preset read."))
+        self._read_value("color_preset", self.backend.get_color_preset, _("Color preset read."))
 
     def read_input_source(self) -> None:
-        def op() -> None:
-            value = self.backend.get_input_source(self.current_monitor_index())
-            if value.selector is not None:
-                self.select_combo_by_value(self.input_combo, value.selector)
-            self.input_status_label.setText(value.as_text())
-
-        self.run_safe(op, _("Input read."))
+        self._read_value("input_source", self.backend.get_input_source, _("Input read."))
 
     def read_capabilities(self) -> None:
-        def op() -> None:
-            text = self.backend.get_capabilities_text(self.current_monitor_index())
-            self.diagnostics_text.setPlainText(text)
-
-        self.run_safe(op, _("Capabilities read."))
+        self.info(_("Bulk diagnostics temporarily disabled."))
 
     def read_getvcp_all(self) -> None:
-        def op() -> None:
-            text = self.backend.get_all_vcps_text(self.current_monitor_index())
-            self.diagnostics_text.setPlainText(text)
+        self.info(_("Bulk diagnostics temporarily disabled."))
 
-        self.run_safe(op, _("getvcp all read."))
-
-    # ------------------------------------------------------------------
-    # Escrituras
-    # ------------------------------------------------------------------
+    def _apply_value(self, setter: Callable[[], Any], message: str) -> None:
+        self._submit_ddc(setter, lambda _value: None, message)
 
     def apply_brightness(self, value: int) -> None:
-        self.run_safe(
-            lambda: self.backend.set_brightness(self.current_monitor_index(), value),
+        index = self.current_monitor_index()
+        self._apply_value(
+            lambda: self.backend.set_brightness(index, value),
             _("Brightness applied: {value}").format(value=value),
         )
 
     def apply_contrast(self, value: int) -> None:
-        self.run_safe(
-            lambda: self.backend.set_contrast(self.current_monitor_index(), value),
+        index = self.current_monitor_index()
+        self._apply_value(
+            lambda: self.backend.set_contrast(index, value),
             _("Contrast applied: {value}").format(value=value),
         )
 
     def apply_volume(self, value: int) -> None:
-        self.run_safe(
-            lambda: self.backend.set_volume(self.current_monitor_index(), value),
+        index = self.current_monitor_index()
+        self._apply_value(
+            lambda: self.backend.set_volume(index, value),
             _("Volume applied: {value}").format(value=value),
         )
 
     def apply_red(self, value: int) -> None:
-        self.run_safe(
-            lambda: self.backend.set_rgb_gain(self.current_monitor_index(), "red", value),
+        index = self.current_monitor_index()
+        self._apply_value(
+            lambda: self.backend.set_rgb_gain(index, "red", value),
             _("Red gain applied: {value}").format(value=value),
         )
 
     def apply_green(self, value: int) -> None:
-        self.run_safe(
-            lambda: self.backend.set_rgb_gain(self.current_monitor_index(), "green", value),
+        index = self.current_monitor_index()
+        self._apply_value(
+            lambda: self.backend.set_rgb_gain(index, "green", value),
             _("Green gain applied: {value}").format(value=value),
         )
 
     def apply_blue(self, value: int) -> None:
-        self.run_safe(
-            lambda: self.backend.set_rgb_gain(self.current_monitor_index(), "blue", value),
+        index = self.current_monitor_index()
+        self._apply_value(
+            lambda: self.backend.set_rgb_gain(index, "blue", value),
             _("Blue gain applied: {value}").format(value=value),
         )
 
     def apply_color_preset(self) -> None:
+        index = self.current_monitor_index()
         value = int(self.color_preset_combo.currentData())
-
-        self.run_safe(
-            lambda: self.backend.set_color_preset(self.current_monitor_index(), value),
+        self._apply_value(
+            lambda: self.backend.set_color_preset(index, value),
             _("Color preset applied: {color_preset_label_value}").format(
                 color_preset_label_value=color_preset_label(value)
             ),
         )
-
-        self.read_color_preset()
+        # No automatic readback after a write. Use Read explicitly if needed.
 
     def apply_input_source(self) -> None:
+        index = self.current_monitor_index()
         value = int(self.input_combo.currentData())
         label = input_source_label(value)
 
         answer = QMessageBox.warning(
             self,
             APP_NAME,
-            (
-                _(
-                    "You are about to change the monitor input to:\n\n{label} · 0x{value:02X}\n\nIf that input has no signal, the screen may go blank until you switch back using the physical buttons on the monitor.\n\nDo you want to continue?"
-                ).format(label=label, value=value)
-            ),
+            _(
+                "You are about to change the monitor input to:\n\n{label} · 0x{value:02X}\n\nIf that input has no signal, the screen may go blank until you switch back using the physical buttons on the monitor.\n\nDo you want to continue?"
+            ).format(label=label, value=value),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
-
         if answer != QMessageBox.Yes:
             self.info(_("Input change cancelled."))
             return
 
-        self.run_safe(
-            lambda: self.backend.set_input_source(self.current_monitor_index(), value),
+        self._apply_value(
+            lambda: self.backend.set_input_source(index, value),
             _("Input applied: {label}").format(label=label),
         )
 

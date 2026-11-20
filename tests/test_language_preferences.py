@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QLocale, QSettings
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 import app
 import i18n
@@ -68,6 +68,64 @@ class LanguageResolutionTests(unittest.TestCase):
                 self.assertEqual(fields(english), fields(spanish))
 
 
+class SafeBackendTests(unittest.TestCase):
+    def test_profile_does_not_run_deep_diagnostics(self):
+        from backend import COMMON_VCPS, PlasmaDDCBackend
+        backend = PlasmaDDCBackend()
+        monitor = MonitorSummary(0, 1, 4, "/dev/i2c-4", None, "GSM", "LG", None, "LG")
+        with (
+            patch.object(backend, "_get_monitor_summary", return_value=monitor),
+            patch.object(backend, "get_vcp", return_value=VCPValue(0x10, "Brightness", 50, 100)) as get_vcp,
+            patch.object(backend, "get_capabilities_text") as capabilities,
+            patch.object(backend, "get_all_vcps_text") as get_all,
+        ):
+            profile = backend.build_monitor_profile(0)
+        self.assertEqual(get_vcp.call_count, len(COMMON_VCPS))
+        self.assertEqual(len(profile.values), len(COMMON_VCPS))
+        capabilities.assert_not_called()
+        get_all.assert_not_called()
+
+    def test_detection_skips_monitorcontrol_if_ddcutil_succeeds(self):
+        from backend import PlasmaDDCBackend
+        backend = PlasmaDDCBackend()
+        monitor = MonitorSummary(0, 1, 4, "/dev/i2c-4", None, "GSM", "LG", None, "LG")
+        with (
+            patch.object(backend, "ddcutil_available", return_value=True),
+            patch.object(backend.ddcutil, "detect", return_value="simulated"),
+            patch("backend.parse_ddcutil_detect_output", return_value=[monitor]),
+            patch.object(backend, "monitorcontrol_available", return_value=True),
+            patch("backend.get_monitors") as get_monitors,
+        ):
+            monitors = backend.refresh_monitors()
+        self.assertEqual(monitors, [monitor])
+        get_monitors.assert_not_called()
+
+
+class SafeStartupTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.application = QApplication.instance() or QApplication([])
+
+    def test_window_construction_never_scans_monitor(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("app.QSettings", side_effect=lambda *args: QSettings(
+                str(Path(directory) / "settings.ini"), QSettings.IniFormat
+            )),
+            patch("app.PlasmaDDCBackend") as backend_cls,
+        ):
+            window = app.MainWindow()
+            try:
+                backend = backend_cls.return_value
+                backend.refresh_monitors.assert_not_called()
+                backend.build_monitor_profile.assert_not_called()
+                backend.monitorcontrol_reliable.assert_not_called()
+                self.assertFalse(window.reload_button.isEnabled())
+            finally:
+                window.close()
+                window.deleteLater()
+
+
 class LanguagePreferencesTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -103,8 +161,19 @@ class LanguagePreferencesTests(unittest.TestCase):
         for item in self.patches:
             item.start()
         self.window = app.MainWindow()
+        # The existing language tests use a synchronous, mocked response to
+        # detection. A separate test suite verifies the real background worker.
+        def simulated_submit(operation, on_result, success, **_kwargs):
+            on_result(operation())
+            return True
+        self.submit_patch = patch.object(
+            self.window, "_submit_ddc", side_effect=simulated_submit
+        )
+        self.submit_patch.start()
+        self.window.refresh_monitors()
 
     def tearDown(self):
+        self.submit_patch.stop()
         self.window.close()
         self.window.deleteLater()
         self.application.processEvents()
@@ -123,6 +192,7 @@ class LanguagePreferencesTests(unittest.TestCase):
         self.assertEqual(self.make_settings().value("language"), "es")
         self.backend.set_volume.assert_not_called()
         self.backend.set_brightness.assert_not_called()
+        self.backend.build_monitor_profile.assert_not_called()
         other = app.MainWindow()
         self.assertEqual(other.volume_control.read_button.text(), "Leer")
         other.close()
@@ -131,6 +201,28 @@ class LanguagePreferencesTests(unittest.TestCase):
         self.assertEqual(self.window.volume_control.apply_button.text(), "Apply")
         self.assertEqual(self.window.sidebar.item(0).text(), "Overview")
         self.assertEqual(self.window.sidebar.currentRow(), 3)
+
+    def test_language_change_does_not_touch_hardware(self):
+        self.backend.reset_mock()
+        self.window.set_language_preference("es")
+        self.window.set_language_preference("en")
+        self.backend.refresh_monitors.assert_not_called()
+        self.backend.build_monitor_profile.assert_not_called()
+        self.backend.get_brightness.assert_not_called()
+        self.backend.monitorcontrol_reliable.assert_not_called()
+
+    def test_detect_does_not_load_profile_automatically(self):
+        self.backend.reset_mock()
+        with patch("app.QMessageBox.warning", return_value=QMessageBox.Yes):
+            self.window.refresh_monitors()
+        self.backend.refresh_monitors.assert_called_once()
+        self.backend.build_monitor_profile.assert_not_called()
+        self.backend.monitorcontrol_reliable.assert_not_called()
+
+    def test_selection_does_not_load_profile(self):
+        self.backend.reset_mock()
+        self.window.monitor_combo.setCurrentIndex(1)
+        self.backend.build_monitor_profile.assert_not_called()
 
     def test_system_default_uses_spanish_locale(self):
         with patch("app.QLocale.system", return_value=QLocale("es_MX")):

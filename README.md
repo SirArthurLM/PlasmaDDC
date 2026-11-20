@@ -36,6 +36,25 @@ It currently uses:
 
 The application has been developed and tested mainly on Kubuntu / KDE Plasma / Wayland.
 
+### Experimental AMD/DisplayPort safety work (development branch)
+
+The `fix/safe-ddc-startup` branch is **not yet a hardware-validated release**.
+After an observed `amdgpu` driver freeze when PlasmaDDC was launched on
+AMD/DisplayPort, this branch intentionally:
+
+- Opens without detecting or reading any monitor.
+- Requests consent before the first DDC/CI operation in each session.
+- Performs explicitly requested queries/writes on a Qt worker thread, one at a time.
+- Allows individual **Read** requests; disables **Read values** (bulk eight-VCP
+  read), `capabilities`, and `getvcp all` until the driver issue is understood.
+- Reuses cached values when changing language; never re-reads for translations.
+
+**Warning:** Background execution prevents a slow command from directly blocking
+Qt's event loop, but it cannot protect against a faulty kernel/GPU driver.
+Even an individual read or detection can still freeze the entire desktop.
+Do not use hardware operations on a configuration known to hang until it can
+be tested under suitable precautions. Automated tests use simulated backends.
+
 ## Screenshots
 
 Screenshots will be added later.
@@ -101,8 +120,8 @@ English, unsupported, or unavailable locales use English.
 
 The preference is stored in Qt's per-user settings (`PlasmaDDC/PlasmaDDC`, key
 `language`). On Linux this is normally `~/.config/PlasmaDDC/PlasmaDDC.conf`.
-Language changes only refresh the interface and read monitor values; they do not
-change monitor settings. Raw diagnostic output comes from `ddcutil` unchanged.
+Language changes refresh the interface using previously cached values, without
+accessing the monitor. Raw diagnostic output comes from `ddcutil` unchanged.
 
 English messages are the fallback source text. The Spanish catalog lives in
 `translations/es.json`; translated messages must preserve their format placeholders.

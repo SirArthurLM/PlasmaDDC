@@ -656,13 +656,13 @@ class PlasmaDDCBackend:
             except Exception:
                 self._ddc_monitors = []
 
-        if self.monitorcontrol_available():
+        # Avoid a second bus scan when ddcutil has already found a monitor.
+        self._monitorcontrol_monitors = []
+        if not self._ddc_monitors and self.monitorcontrol_available():
             try:
                 self._monitorcontrol_monitors = list(get_monitors())
             except Exception:
                 self._monitorcontrol_monitors = []
-        else:
-            self._monitorcontrol_monitors = []
 
         if self._ddc_monitors:
             return self._ddc_monitors
@@ -847,15 +847,8 @@ class PlasmaDDCBackend:
         monitor = self._get_monitor_summary(index)
         profile = MonitorProfile(monitor=monitor)
 
-        try:
-            profile.capabilities_text = self.get_capabilities_text(index)
-        except Exception as exc:
-            profile.errors["capabilities"] = str(exc)
-
-        try:
-            profile.getvcp_all_text = self.get_all_vcps_text(index)
-        except Exception as exc:
-            profile.errors["getvcp_all"] = str(exc)
+        # Capabilities and getvcp all can trigger many low-level I2C reads.
+        # Leave them for the explicit Diagnostics buttons instead.
 
         for key, code in COMMON_VCPS.items():
             try:
