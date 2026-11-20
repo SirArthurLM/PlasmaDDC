@@ -132,5 +132,10 @@
   "Another DDC/CI operation is still running.": "Todavía hay otra operación DDC/CI en curso.",
   "Detect a monitor first.": "Primero detecta un monitor.",
   "DDC/CI operation in progress…": "Operación DDC/CI en curso…",
-  "Bulk diagnostics temporarily disabled.": "Diagnósticos masivos desactivados temporalmente."
+  "Bulk diagnostics temporarily disabled.": "Diagnósticos masivos desactivados temporalmente.",
+  "DEMO MODE — simulated monitors; no DDC/CI access.": "MODO DEMOSTRACIÓN — monitores simulados; sin acceso a DDC/CI.",
+  "Demo mode: all changes are simulated.": "Modo demostración: todos los cambios son simulados.",
+  "Demo monitors refreshed (no hardware access).": "Monitores simulados actualizados (sin acceso al hardware).",
+  "Active control backend: demo (simulated)": "Backend de control activo: demostración (simulado)",
+  "Demo operation in progress…": "Operación de demostración en curso…"
 }

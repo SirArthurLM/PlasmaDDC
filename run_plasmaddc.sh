@@ -27,4 +27,4 @@ if [[ ! -f "$APP_FILE" ]]; then
     exit 1
 fi
 
-exec "$VENV_PYTHON" "$APP_FILE"
+exec "$VENV_PYTHON" "$APP_FILE" "$@"

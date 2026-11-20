@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import sys
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -32,6 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from demo_backend import DemoBackend
 from i18n import _, language_manager
 
 from backend import (
@@ -219,25 +221,29 @@ class ValueControl(QWidget):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, demo_mode: bool = False) -> None:
         super().__init__()
 
-        self.settings = QSettings(APP_NAME, APP_NAME)
+        # Keep demo preferences separate from the real app's user settings.
+        settings_name = f"{APP_NAME}-Demo" if demo_mode else APP_NAME
+        self.settings = QSettings(APP_NAME, settings_name)
         language_manager.configure(
             self.settings.value("language", "system", type=str),
             QLocale.system().name(),
         )
-        self.backend = PlasmaDDCBackend()
+        self.demo_mode = demo_mode
+        # In demo mode we never construct the real backend or open an I2C bus.
+        self.backend = DemoBackend() if demo_mode else PlasmaDDCBackend()
         self.monitors = []
         self.current_profile = None
-        self._hardware_authorized = False
+        self._hardware_authorized = demo_mode
         self._ddc_busy = False
         self._ddc_job: DDCJob | None = None
         self._ddc_callback: Callable[[Any], None] | None = None
         self._ddc_success = ""
         self._profile_cache = {}
 
-        self.setWindowTitle(APP_NAME)
+        self.setWindowTitle(f"{APP_NAME} — DEMO" if demo_mode else APP_NAME)
         self.resize(1040, 720)
 
         self._build_ui()
@@ -246,7 +252,12 @@ class MainWindow(QMainWindow):
         # unsafe on certain GPU / DisplayPort driver combinations.
         self.disable_all_controls(_("Detect a monitor before using DDC/CI controls."))
         self.reload_button.setEnabled(False)
-        self.statusBar().showMessage(_("Ready. No monitor hardware has been queried."))
+        if self.demo_mode:
+            # In-memory data only; no worker or hardware detection at startup.
+            self._detection_finished(self.backend.refresh_monitors())
+            self.statusBar().showMessage(_("Demo mode: all changes are simulated."))
+        else:
+            self.statusBar().showMessage(_("Ready. No monitor hardware has been queried."))
 
     # ------------------------------------------------------------------
     # UI base
@@ -296,6 +307,12 @@ class MainWindow(QMainWindow):
         subtitle.setStyleSheet("opacity: 0.75;")
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
+        if self.demo_mode:
+            demo_label = QLabel(_("DEMO MODE — simulated monitors; no DDC/CI access."))
+            demo_label.setObjectName("demoModeBanner")
+            demo_label.setWordWrap(True)
+            demo_label.setStyleSheet("font-weight: 600; border: 1px solid palette(mid); padding: 4px;")
+            title_box.addWidget(demo_label)
 
         self.monitor_combo = QComboBox()
         self.monitor_combo.setMinimumWidth(340)
@@ -675,7 +692,11 @@ class MainWindow(QMainWindow):
         self._ddc_callback = on_result
         self._ddc_success = success
         job.signals.completed.connect(self._ddc_completed, Qt.QueuedConnection)
-        self.set_busy(True, _("DDC/CI operation in progress…"))
+        self.set_busy(
+            True,
+            _("Demo operation in progress…") if self.demo_mode
+            else _("DDC/CI operation in progress…"),
+        )
         try:
             QThreadPool.globalInstance().start(job)
         except Exception:
@@ -729,7 +750,9 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def authorize_hardware_access(self) -> bool:
-        """Require explicit consent before any DDC/CI operation this session."""
+        """Require explicit consent before any real DDC/CI operation this session."""
+        if self.demo_mode:
+            return True
         if self._hardware_authorized:
             return True
         answer = QMessageBox.warning(
@@ -749,7 +772,11 @@ class MainWindow(QMainWindow):
         return False
 
     def refresh_monitors(self) -> None:
-        """Only detect on explicit click, in a worker, never at startup."""
+        """Only real detection needs explicit consent and a worker."""
+        if self.demo_mode:
+            self._detection_finished(self.backend.refresh_monitors())
+            self.info(_("Demo monitors refreshed (no hardware access)."))
+            return
         self._submit_ddc(
             self.backend.refresh_monitors,
             self._detection_finished,
@@ -772,7 +799,19 @@ class MainWindow(QMainWindow):
             self.monitor_combo.blockSignals(False)
         # No follow-up I2C reads after detection.
         self.reload_button.setEnabled(False)
+        if self.demo_mode:
+            # Populate all controls from simulated in-memory values.
+            self._populate_demo_profiles()
         self.select_current_monitor()
+
+    def _populate_demo_profiles(self) -> None:
+        """Read only the in-memory DemoBackend, never an external monitor."""
+        if not self.demo_mode:
+            return
+        self._profile_cache = {
+            monitor.index: self.backend.build_monitor_profile(monitor.index)
+            for monitor in self.monitors
+        }
 
     def select_current_monitor(self, _unused: int = -1) -> None:
         """Update UI from cached data; never contact the monitor."""
@@ -877,7 +916,8 @@ class MainWindow(QMainWindow):
                     _("monitorcontrol reliable for basic VCP controls: {value}").format(
                         value=_("Not checked automatically")
                     ),
-                    _("Active control backend: ddcutil"),
+                    (_("Active control backend: demo (simulated)") if self.demo_mode
+                     else _("Active control backend: ddcutil")),
                 ]
             )
         )
@@ -1053,7 +1093,12 @@ class MainWindow(QMainWindow):
         self.info(_("Bulk diagnostics temporarily disabled."))
 
     def _apply_value(self, setter: Callable[[], Any], message: str) -> None:
-        self._submit_ddc(setter, lambda _value: None, message)
+        def on_result(_value: Any) -> None:
+            if self.demo_mode:
+                # A demo write changes only the simulated state; refresh locally.
+                self._populate_demo_profiles()
+                self.select_current_monitor()
+        self._submit_ddc(setter, on_result, message)
 
     def apply_brightness(self, value: int) -> None:
         index = self.current_monitor_index()
@@ -1113,15 +1158,19 @@ class MainWindow(QMainWindow):
         value = int(self.input_combo.currentData())
         label = input_source_label(value)
 
-        answer = QMessageBox.warning(
-            self,
-            APP_NAME,
-            _(
-                "You are about to change the monitor input to:\n\n{label} · 0x{value:02X}\n\nIf that input has no signal, the screen may go blank until you switch back using the physical buttons on the monitor.\n\nDo you want to continue?"
-            ).format(label=label, value=value),
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
+        # Changing a simulated input cannot blank the physical display.
+        if not self.demo_mode:
+            answer = QMessageBox.warning(
+                self,
+                APP_NAME,
+                _(
+                    "You are about to change the monitor input to:\n\n{label} · 0x{value:02X}\n\nIf that input has no signal, the screen may go blank until you switch back using the physical buttons on the monitor.\n\nDo you want to continue?"
+                ).format(label=label, value=value),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+        else:
+            answer = QMessageBox.Yes
         if answer != QMessageBox.Yes:
             self.info(_("Input change cancelled."))
             return
@@ -1132,11 +1181,19 @@ class MainWindow(QMainWindow):
         )
 
 
-def main() -> int:
-    app = QApplication(sys.argv)
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="PlasmaDDC monitor control")
+    parser.add_argument(
+        "--demo", action="store_true",
+        help="Use simulated monitors; never access real DDC/CI hardware",
+    )
+    arguments, qt_arguments = parser.parse_known_args(
+        sys.argv[1:] if argv is None else argv
+    )
+    app = QApplication([sys.argv[0], *qt_arguments])
     app.setApplicationName(APP_NAME)
 
-    window = MainWindow()
+    window = MainWindow(demo_mode=arguments.demo)
     window.show()
 
     return app.exec()

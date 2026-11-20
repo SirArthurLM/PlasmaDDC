@@ -55,6 +55,35 @@ Even an individual read or detection can still freeze the entire desktop.
 Do not use hardware operations on a configuration known to hang until it can
 be tested under suitable precautions. Automated tests use simulated backends.
 
+## Demo mode (safe simulated monitors)
+
+To test the GUI without querying actual DDC/CI hardware, use the new **demo mode**:
+
+```bash
+./run_plasmaddc.sh --demo
+```
+
+Demo mode creates two entirely simulated monitors and immediately fills in
+brightness, contrast, RGB gains, volume, color preset, and input selection.
+All **Read**, **Apply**, and **Change input** actions operate exclusively on
+in-memory demo values. A visible DEMO banner distinguishes the simulated window
+from real hardware mode. The demo backend **never calls ddcutil, monitorcontrol,
+or `/dev/i2c-*`**, and no real monitor is detected or changed. Simulation resets
+when the app exits; demo-language preferences use separate Qt settings from the
+real application's preferences.
+
+The main window still uses Qt and the computer's graphics stack to draw itself;
+`--demo` only guarantees that PlasmaDDC will not perform real DDC/CI access.
+
+For automated offline checks (with PySide6 installed):
+
+```bash
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m unittest discover -s tests -p 'test_*.py' -v
+```
+
+**Do not use normal hardware mode on a system with an unresolved GPU/DDC/CI
+freeze.** Demo mode can validate GUI behavior, not real driver stability.
+
 ## Screenshots
 
 Screenshots will be added later.
