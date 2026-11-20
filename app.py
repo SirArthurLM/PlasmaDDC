@@ -192,6 +192,7 @@ class ValueControl(QWidget):
 
         self.slider.setRange(0, maximum)
         self.spin.setRange(0, maximum)
+        self.spin.setSpecialValueText("")
         self.slider.setValue(current)
         self.spin.setValue(current)
 
@@ -213,6 +214,15 @@ class ValueControl(QWidget):
             self.status_label.setText(f"{current}/{maximum} · {value.backend}")
 
     def set_unavailable(self, reason: str) -> None:
+        # A disabled zero can be mistaken for a real monitor reading.
+        # Use a placeholder until a VCP value has been explicitly read.
+        self.slider.blockSignals(True)
+        self.spin.blockSignals(True)
+        self.slider.setValue(self.slider.minimum())
+        self.spin.setValue(self.spin.minimum())
+        self.spin.setSpecialValueText(_("Not read"))
+        self.slider.blockSignals(False)
+        self.spin.blockSignals(False)
         self.setEnabled(False)
         self.status_label.setText(_("Unavailable: {reason}").format(reason=reason))
 
@@ -512,6 +522,7 @@ class MainWindow(QMainWindow):
         preset_layout = QHBoxLayout(preset_group)
 
         self.color_preset_combo = QComboBox()
+        self.color_preset_combo.setPlaceholderText(_("Not read"))
         for label, value in common_color_presets():
             self.color_preset_combo.addItem(f"{label} · 0x{value:02X}", value)
 
@@ -580,6 +591,7 @@ class MainWindow(QMainWindow):
         form = QFormLayout(group)
 
         self.input_combo = QComboBox()
+        self.input_combo.setPlaceholderText(_("Not read"))
         for label, value in unique_input_sources():
             self.input_combo.addItem(f"{label} · 0x{value:02X}", value)
 
@@ -874,11 +886,13 @@ class MainWindow(QMainWindow):
                 control.apply_button.setEnabled(False)
                 control.read_button.setEnabled(True)
 
+        self.color_preset_combo.setCurrentIndex(-1)
         self.color_preset_combo.setEnabled(False)
         self.color_apply_button.setEnabled(False)
         self.color_read_button.setEnabled(allow_read)
         self.color_status_label.setText(reason)
 
+        self.input_combo.setCurrentIndex(-1)
         self.input_combo.setEnabled(False)
         self.input_apply_button.setEnabled(False)
         self.input_read_button.setEnabled(allow_read)
@@ -1008,6 +1022,7 @@ class MainWindow(QMainWindow):
         value = self.current_profile.values.get("color_preset")
 
         if value is None:
+            self.color_preset_combo.setCurrentIndex(-1)
             self.color_preset_combo.setEnabled(False)
             self.color_apply_button.setEnabled(False)
             self.color_read_button.setEnabled(True)
@@ -1033,6 +1048,7 @@ class MainWindow(QMainWindow):
         value = self.current_profile.values.get("input_source")
 
         if value is None:
+            self.input_combo.setCurrentIndex(-1)
             self.input_combo.setEnabled(False)
             self.input_apply_button.setEnabled(False)
             self.input_read_button.setEnabled(True)
@@ -1152,8 +1168,26 @@ class MainWindow(QMainWindow):
     def apply_color_preset(self) -> None:
         index = self.current_monitor_index()
         value = int(self.color_preset_combo.currentData())
+
+        def set_preset() -> str:
+            try:
+                return self.backend.set_color_preset(index, value)
+            except PlasmaDDCError as exc:
+                error = str(exc)
+                if "DDCRC_VERIFY" in error or "Verification failed for feature 14" in error:
+                    # A failed verification does not prove the monitor ignored
+                    # the write; avoid additional PlasmaDDC operations or I2C traffic.
+                    raise PlasmaDDCError(
+                        _(
+                            "Color preset verification failed. The monitor may have changed "
+                            "anyway. Use Read to check the actual value. "
+                            "PlasmaDDC did not issue an additional operation."
+                        ) + "\n\n" + error
+                    ) from exc
+                raise
+
         self._apply_value(
-            lambda: self.backend.set_color_preset(index, value),
+            set_preset,
             _("Color preset applied: {color_preset_label_value}").format(
                 color_preset_label_value=color_preset_label(value)
             ),

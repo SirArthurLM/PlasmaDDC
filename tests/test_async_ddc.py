@@ -14,7 +14,7 @@ from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
 import app
-from backend import MonitorSummary, VCPValue
+from backend import MonitorSummary, PlasmaDDCError, VCPValue
 
 
 class AsyncDDCChecks(unittest.TestCase):
@@ -227,6 +227,52 @@ class AsyncDDCChecks(unittest.TestCase):
         self.backend.get_brightness.assert_not_called()
         self.backend.refresh_monitors.assert_not_called()
 
+
+
+    def test_unread_controls_show_placeholders_not_fake_values(self):
+        self.window._detection_finished([self.monitor])
+        for control in (self.window.brightness_control, self.window.contrast_control,
+                        self.window.volume_control):
+            self.assertNotEqual(control.spin.text(), "0")
+            self.assertFalse(control.apply_button.isEnabled())
+            self.assertTrue(control.read_button.isEnabled())
+        self.assertEqual(self.window.input_combo.currentIndex(), -1)
+        self.assertEqual(self.window.color_preset_combo.currentIndex(), -1)
+        self.backend.get_brightness.assert_not_called()
+
+    def test_valid_zero_is_displayed_after_explicit_read(self):
+        self.window._detection_finished([self.monitor])
+        self.window._hardware_authorized = True
+        self.backend.get_brightness.return_value = VCPValue(0x10, "Brightness", 0, 100)
+        self.window.read_brightness()
+        self.wait_until(lambda: not self.window._ddc_busy)
+        self.assertEqual(self.window.brightness_control.spin.text(), "0")
+        self.assertTrue(self.window.brightness_control.apply_button.isEnabled())
+
+    def test_color_preset_verify_error_warns_without_automatic_second_operation(self):
+        self.window._detection_finished([self.monitor])
+        self.window._hardware_authorized = True
+        self.backend.get_color_preset.return_value = VCPValue(
+            0x14, "Select color preset", selector=0x06, label="7500 K"
+        )
+        self.window.read_color_preset()
+        self.wait_until(lambda: not self.window._ddc_busy)
+        self.backend.reset_mock()
+        self.backend.set_color_preset.side_effect = PlasmaDDCError(
+            "Verification failed for feature 14\nTry errors: DDCRC_VERIFY"
+        )
+        errors = []
+        self.window.show_error = errors.append  # Avoid a modal QMessageBox in tests.
+        self.window.color_preset_combo.setCurrentIndex(
+            self.window.color_preset_combo.findData(0x04)
+        )
+        self.window.apply_color_preset()
+        self.wait_until(lambda: not self.window._ddc_busy)
+        self.backend.set_color_preset.assert_called_once_with(0, 0x04)
+        self.backend.get_color_preset.assert_not_called()
+        self.assertEqual(len(errors), 1)
+        self.assertIn("DDCRC_VERIFY", errors[0])
+        self.assertIn("PlasmaDDC", errors[0])
 
 
 if __name__ == "__main__":
