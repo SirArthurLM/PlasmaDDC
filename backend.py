@@ -140,6 +140,15 @@ class VCPUnsupportedError(PlasmaDDCError):
     pass
 
 
+class DDCUtilCommandError(PlasmaDDCError):
+    """An unsuccessful ddcutil command that may still have useful output."""
+
+    def __init__(self, output: str, returncode: int) -> None:
+        super().__init__(output)
+        self.output = output
+        self.returncode = returncode
+
+
 class BackendMode(str, Enum):
     AUTO = "auto"
     DDCUTIL = "ddcutil"
@@ -484,6 +493,7 @@ class DDCUtilRunner:
         display_number: int | None = None,
         bus_number: int | None = None,
         timeout: int | None = None,
+        preserve_partial_output: bool = False,
     ) -> str:
         self.require_available()
 
@@ -503,6 +513,11 @@ class DDCUtilRunner:
                 check=False,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                # Monitor-supplied capabilities can contain non-UTF-8 bytes.
+                # Preserve their hex values visibly rather than raising an
+                # unrelated UnicodeDecodeError and discarding the report.
+                errors="backslashreplace",
                 timeout=timeout or self.timeout,
             )
         except subprocess.TimeoutExpired as exc:
@@ -527,12 +542,19 @@ class DDCUtilRunner:
             ):
                 raise DDCPermissionError(output or _("Permission denied using ddcutil."))
 
+            # In explicitly requested bulk diagnostics, individual unsupported
+            # features can coexist with useful VCP values. Keep that output
+            # (with a nonzero status) instead of showing it all in a dialog.
+            if preserve_partial_output and output:
+                raise DDCUtilCommandError(output, completed.returncode)
+
             if "unsupported" in lowered or "not supported" in lowered:
                 raise VCPUnsupportedError(output)
 
+            if output:
+                raise DDCUtilCommandError(output, completed.returncode)
             raise PlasmaDDCError(
-                output
-                or _("ddcutil failed: {join_full_cmd}").format(join_full_cmd=" ".join(full_cmd))
+                _("ddcutil failed: {join_full_cmd}").format(join_full_cmd=" ".join(full_cmd))
             )
 
         return output
@@ -550,6 +572,7 @@ class DDCUtilRunner:
             display_number=display_number,
             bus_number=bus_number,
             timeout=30,
+            preserve_partial_output=True,
         )
 
     def get_vcp(
@@ -580,6 +603,7 @@ class DDCUtilRunner:
             display_number=display_number,
             bus_number=bus_number,
             timeout=45,
+            preserve_partial_output=True,
         )
 
     def set_vcp(
@@ -802,13 +826,31 @@ class PlasmaDDCBackend:
     def detect_text(self) -> str:
         return self.ddcutil.detect()
 
+    @staticmethod
+    def _diagnostic_output(operation: Any) -> str:
+        """Keep useful partial diagnostic output without hiding ddcutil failures.
+
+        Only explicitly requested advanced diagnostics can use this path.
+        Regular control reads and writes continue to report errors normally.
+        """
+        try:
+            return operation()
+        except DDCUtilCommandError as exc:
+            if not exc.output.strip():
+                raise
+            return (
+                _("WARNING: ddcutil exited with code {code}; this output may be incomplete.")
+                .format(code=exc.returncode)
+                + "\n\n" + exc.output
+            )
+
     def get_capabilities_text(self, index: int = 0) -> str:
         sel = self._ddc_select(index)
-        return self.ddcutil.capabilities(**sel)
+        return self._diagnostic_output(lambda: self.ddcutil.capabilities(**sel))
 
     def get_all_vcps_text(self, index: int = 0) -> str:
         sel = self._ddc_select(index)
-        return self.ddcutil.get_vcp_all(**sel)
+        return self._diagnostic_output(lambda: self.ddcutil.get_vcp_all(**sel))
 
     def get_vcp(self, index: int, code: int | str) -> VCPValue:
         sel = self._ddc_select(index)

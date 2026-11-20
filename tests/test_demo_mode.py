@@ -135,6 +135,20 @@ class DemoWindowTests(unittest.TestCase):
         self.wait_until(lambda: not self.window._ddc_busy)
         self.assertEqual(self.window.brightness_control.spin.value(), 88)
 
+    def test_demo_section_reads_need_no_confirmation_or_external_access(self):
+        with patch("app.QMessageBox.warning", side_effect=AssertionError("dialog shown")):
+            self.window.read_picture_section()
+            self.wait_until(lambda: not self.window._ddc_busy)
+            self.window.read_color_section()
+            self.wait_until(lambda: not self.window._ddc_busy)
+            self.window.read_audio_section()
+            self.wait_until(lambda: not self.window._ddc_busy)
+        self.assertEqual(self.window.brightness_control.value(), 70)
+        self.assertEqual(self.window.red_control.value(), 50)
+        self.assertEqual(self.window.volume_control.value(), 45)
+        self.assertFalse(self.window.capabilities_button.isEnabled())
+        self.assertFalse(self.window.getvcp_all_button.isEnabled())
+
     def test_demo_input_source_needs_no_hardware_confirmation(self):
         self.window.select_combo_by_value(self.window.input_combo, 0x11)
         with patch("app.QMessageBox.warning", side_effect=AssertionError("dialog shown")):

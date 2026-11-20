@@ -247,6 +247,26 @@ This design was chosen because some monitors respond correctly to `ddcutil` but 
 
 The graphical interface does not need to know which low-level backend is being used. It talks to `backend.py`, which handles the details.
 
+## Safe, on-demand section reads and diagnostics
+
+After detecting a monitor, click **Read picture controls** (2 sequential reads),
+**Read color controls** (4 sequential reads), or **Read audio controls** (1 read)
+to load values for that section. **Read this section** in the toolbar/menu works
+on Picture, Color, Audio, or Input. No values are queried automatically by
+switching pages, changing language, or opening the app. A confirmation is
+required for multi-read operations on real hardware. A single background job
+runs the reads one at a time, with a short delay between real reads.
+
+The color preset menu shows *generic MCCS choices*, not a verified list for
+any particular monitor. Applying a real preset requires confirmation; the
+monitor may reject or apply it without verifying. The RGB controls may require
+User/Custom color mode in the physical monitor OSD.
+
+Advanced **capabilities** and **getvcp all** diagnostics are available only
+after monitor detection and explicit confirmation. They may perform many
+DDC/CI requests and **can still trigger a kernel graphics-driver hang** even
+though the GUI uses a background thread. They are disabled in `--demo`.
+
 ## Known limitations
 
 Not all monitors support the same VCP codes.

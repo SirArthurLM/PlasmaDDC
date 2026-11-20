@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -338,8 +339,10 @@ class MainWindow(QMainWindow):
         self.monitor_combo.currentIndexChanged.connect(self.select_current_monitor)
 
         self.refresh_button = QPushButton(_("Detect monitors"))
-        self.reload_button = QPushButton(_("Read values"))
-        self.reload_button.setToolTip(_("Bulk read disabled; use each control's Read button."))
+        self.reload_button = QPushButton(_("Read this section"))
+        self.reload_button.setToolTip(
+            _("Read only the selected section, when requested.")
+        )
         self.reload_button.setEnabled(False)
         self.refresh_button.clicked.connect(self.refresh_monitors)
         self.reload_button.clicked.connect(self.load_current_monitor)
@@ -354,8 +357,8 @@ class MainWindow(QMainWindow):
 
     def _build_menu(self) -> None:
         app_menu = self.menuBar().addMenu("PlasmaDDC")
-        refresh_action = QAction(_("Read values"), app_menu)
-        refresh_action.setEnabled(False)  # Bulk read intentionally disabled.
+        refresh_action = QAction(_("Read this section"), app_menu)
+        self.read_section_action = refresh_action
         refresh_action.triggered.connect(self.load_current_monitor)
 
         detect_action = QAction(_("Detect monitors"), app_menu)
@@ -373,6 +376,7 @@ class MainWindow(QMainWindow):
         language_action = QAction(_("Language…"), preferences_menu)
         language_action.triggered.connect(self.show_language_preferences)
         preferences_menu.addAction(language_action)
+        self._refresh_section_action()
 
     def show_language_preferences(self) -> None:
         dialog = LanguagePreferencesDialog(self)
@@ -406,7 +410,7 @@ class MainWindow(QMainWindow):
             self.monitor_combo.addItem(monitor.label, monitor.index)
         self.monitor_combo.setCurrentIndex(self.monitor_combo.findData(monitor_index))
         self.monitor_combo.blockSignals(False)
-        # The eight-VCP bulk read is intentionally disabled in this safety stage.
+        # No reads are performed while rebuilding the translated UI.
         self.reload_button.setEnabled(False)
         if self.monitors:
             self.select_current_monitor()
@@ -452,6 +456,17 @@ class MainWindow(QMainWindow):
     def _change_page(self, row: int) -> None:
         if row >= 0:
             self.stack.setCurrentIndex(row)
+        self._refresh_section_action()
+
+    def _refresh_section_action(self) -> None:
+        """Only the four read-only control pages can be batch-read on demand."""
+        if not hasattr(self, "monitor_combo") or not hasattr(self, "sidebar"):
+            return
+        available = bool(self.monitors) and self.sidebar.currentRow() in (1, 2, 3, 4)
+        if hasattr(self, "reload_button"):
+            self.reload_button.setEnabled(available)
+        if hasattr(self, "read_section_action"):
+            self.read_section_action.setEnabled(available)
 
     # ------------------------------------------------------------------
     # Páginas
@@ -505,6 +520,9 @@ class MainWindow(QMainWindow):
 
         group_layout.addWidget(self.brightness_control)
         group_layout.addWidget(self.contrast_control)
+        self.picture_section_button = QPushButton(_("Read picture controls"))
+        self.picture_section_button.clicked.connect(self.read_picture_section)
+        group_layout.addWidget(self.picture_section_button)
 
         layout.addWidget(group)
         layout.addStretch(1)
@@ -529,6 +547,14 @@ class MainWindow(QMainWindow):
         self.color_apply_button = QPushButton(_("Apply preset"))
         self.color_read_button = QPushButton(_("Read"))
         self.color_status_label = QLabel("")
+        self.color_status_label.setWordWrap(True)
+        self.preset_support_notice = QLabel(
+            _(
+                "Preset values are generic MCCS options, not a guarantee of monitor support. "
+                "Check the monitor OSD or explicitly read capabilities in Diagnostics."
+            )
+        )
+        self.preset_support_notice.setWordWrap(True)
 
         self.color_apply_button.clicked.connect(self.apply_color_preset)
         self.color_read_button.clicked.connect(self.read_color_preset)
@@ -550,7 +576,11 @@ class MainWindow(QMainWindow):
         rgb_layout.addWidget(self.blue_control)
 
         layout.addWidget(preset_group)
+        layout.addWidget(self.preset_support_notice)
         layout.addWidget(rgb_group)
+        self.color_section_button = QPushButton(_("Read color controls"))
+        self.color_section_button.clicked.connect(self.read_color_section)
+        layout.addWidget(self.color_section_button)
         layout.addStretch(1)
         return page
 
@@ -572,6 +602,8 @@ class MainWindow(QMainWindow):
         )
 
         group_layout.addWidget(self.volume_control)
+        self.audio_section_button = QPushButton(_("Read audio controls"))
+        self.audio_section_button.clicked.connect(self.read_audio_section)
 
         layout.addWidget(group)
         layout.addStretch(1)
@@ -633,8 +665,8 @@ class MainWindow(QMainWindow):
 
         self.capabilities_button.setEnabled(False)
         self.getvcp_all_button.setEnabled(False)
-        self.capabilities_button.setToolTip(_("Bulk diagnostics temporarily disabled."))
-        self.getvcp_all_button.setToolTip(_("Bulk diagnostics temporarily disabled."))
+        self.capabilities_button.setToolTip(_("Advanced operation: explicit confirmation required."))
+        self.getvcp_all_button.setToolTip(_("Advanced operation: explicit confirmation required."))
         self.capabilities_button.clicked.connect(self.read_capabilities)
         self.getvcp_all_button.clicked.connect(self.read_getvcp_all)
         self.clear_diag_button.clicked.connect(lambda: self.diagnostics_text.clear())
@@ -758,11 +790,13 @@ class MainWindow(QMainWindow):
             self.current_profile = profile
             self.update_from_profile()
 
-    def select_combo_by_value(self, combo: QComboBox, value: int) -> None:
+    def select_combo_by_value(self, combo: QComboBox, value: int) -> bool:
         for i in range(combo.count()):
             if int(combo.itemData(i)) == int(value):
                 combo.setCurrentIndex(i)
-                return
+                return True
+        combo.setCurrentIndex(-1)
+        return False
 
     # ------------------------------------------------------------------
     # Carga de monitores y perfil
@@ -864,10 +898,17 @@ class MainWindow(QMainWindow):
         self.backend_label.setText(_("Monitor detected. Values not read yet."))
         self.disable_all_controls(_("Use Read to query an individual control."), allow_read=True)
         self.diagnostics_text.clear()
+        self._refresh_section_action()
 
     def load_current_monitor(self) -> None:
-        """Bulk reads are deliberately unavailable while investigating AMD hangs."""
-        self.info(_("Bulk read disabled; use each control's Read button."))
+        """Read the selected section explicitly; never scan every VCP."""
+        section = {1: "picture", 2: "color", 3: "audio", 4: "input"}.get(
+            self.sidebar.currentRow()
+        )
+        if section:
+            self._read_section(section)
+        else:
+            self.info(_("Choose Picture, Color, Audio or Input to read that section."))
 
     def disable_all_controls(self, reason: str, *, allow_read: bool = False) -> None:
         for control in (
@@ -897,6 +938,16 @@ class MainWindow(QMainWindow):
         self.input_apply_button.setEnabled(False)
         self.input_read_button.setEnabled(allow_read)
         self.input_status_label.setText(reason)
+
+        for section_button in (
+            self.picture_section_button,
+            self.color_section_button,
+            self.audio_section_button,
+        ):
+            section_button.setEnabled(allow_read)
+        self.capabilities_button.setEnabled(allow_read and not self.demo_mode)
+        self.getvcp_all_button.setEnabled(allow_read and not self.demo_mode)
+        self._refresh_section_action()
 
     def update_from_profile(self) -> None:
         if self.current_profile is None:
@@ -976,6 +1027,15 @@ class MainWindow(QMainWindow):
 
         self.update_color_preset()
         self.update_input_source()
+        for section_button in (
+            self.picture_section_button,
+            self.color_section_button,
+            self.audio_section_button,
+        ):
+            section_button.setEnabled(True)
+        self.capabilities_button.setEnabled(not self.demo_mode)
+        self.getvcp_all_button.setEnabled(not self.demo_mode)
+        self._refresh_section_action()
 
         diag_parts = []
         if profile.capabilities_text:
@@ -1032,13 +1092,15 @@ class MainWindow(QMainWindow):
             return
 
         self.color_preset_combo.setEnabled(True)
-        self.color_apply_button.setEnabled(True)
+        self.color_apply_button.setEnabled(False)
         self.color_read_button.setEnabled(True)
 
         if value.selector is not None:
-            self.select_combo_by_value(self.color_preset_combo, value.selector)
+            found = self.select_combo_by_value(self.color_preset_combo, value.selector)
+            self.color_apply_button.setEnabled(found)
             self.color_status_label.setText(value.as_text())
         else:
+            self.color_preset_combo.setCurrentIndex(-1)
             self.color_status_label.setText(value.as_text())
 
     def update_input_source(self) -> None:
@@ -1109,11 +1171,141 @@ class MainWindow(QMainWindow):
     def read_input_source(self) -> None:
         self._read_value("input_source", self.backend.get_input_source, _("Input read."))
 
+    def _cached_profile(self, index: int):
+        profile = self._profile_cache.get(index)
+        if profile is None:
+            from backend import MonitorProfile
+            monitor = next(m for m in self.monitors if m.index == index)
+            profile = MonitorProfile(monitor)
+            self._profile_cache[index] = profile
+        return profile
+
+    def _section_readers(self, section: str, index: int) -> list[tuple[str, Callable[[], VCPValue]]]:
+        """Fixed, bounded set of reads; no capability scan or bulk VCP scan."""
+        b = self.backend
+        sections = {
+            "picture": [
+                ("brightness", lambda: b.get_brightness(index)),
+                ("contrast", lambda: b.get_contrast(index)),
+            ],
+            "color": [
+                ("color_preset", lambda: b.get_color_preset(index)),
+                ("red_gain", lambda: b.get_rgb_gain(index, "red")),
+                ("green_gain", lambda: b.get_rgb_gain(index, "green")),
+                ("blue_gain", lambda: b.get_rgb_gain(index, "blue")),
+            ],
+            "audio": [("volume", lambda: b.get_volume(index))],
+            "input": [("input_source", lambda: b.get_input_source(index))],
+        }
+        return sections.get(section, [])
+
+    def read_picture_section(self) -> None:
+        self._read_section("picture")
+
+    def read_color_section(self) -> None:
+        self._read_section("color")
+
+    def read_audio_section(self) -> None:
+        self._read_section("audio")
+
+    def _read_section(self, section: str) -> None:
+        if not self.monitors or self._ddc_busy:
+            return
+        index = self.current_monitor_index()
+        readers = self._section_readers(section, index)
+        if not readers:
+            return
+        if not self.demo_mode and len(readers) > 1:
+            answer = QMessageBox.warning(
+                self,
+                APP_NAME,
+                _(
+                    "Read {count} controls sequentially? These DDC/CI requests may "
+                    "still trigger a graphics-driver hang on affected systems."
+                ).format(count=len(readers)),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+
+        def operation():
+            values: dict[str, VCPValue] = {}
+            errors: dict[str, str] = {}
+            for position, (key, reader) in enumerate(readers):
+                if position and not self.demo_mode:
+                    time.sleep(0.25)  # Space out requests on sensitive DP buses.
+                try:
+                    values[key] = reader()
+                except Exception as exc:
+                    errors[key] = str(exc)
+            return values, errors
+
+        def on_result(payload):
+            values, errors = payload
+            profile = self._cached_profile(index)
+            profile.values.update(values)
+            for key in values:
+                profile.errors.pop(key, None)
+            for key, reason in errors.items():
+                profile.values.pop(key, None)
+                profile.errors[key] = reason
+            if index == self.current_monitor_index():
+                self.current_profile = profile
+                self.update_from_profile()
+            self.info(
+                _("Section read: {ok}/{total} controls.").format(
+                    ok=len(values), total=len(readers)
+                )
+            )
+
+        self._submit_ddc(operation, on_result, "")
+
+    def _confirm_advanced_diagnostic(self, operation_name: str) -> bool:
+        if self.demo_mode or not self.monitors or self._ddc_busy:
+            return False
+        answer = QMessageBox.warning(
+            self,
+            APP_NAME,
+            _(
+                "Advanced diagnostic: {operation}. This may perform many DDC/CI "
+                "requests and could hang the graphics driver. Run it only if needed?"
+            ).format(operation=operation_name),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return answer == QMessageBox.Yes
+
+    def _read_diagnostic(self, which: str) -> None:
+        if not self._confirm_advanced_diagnostic(which):
+            return
+        index = self.current_monitor_index()
+        if which == "capabilities":
+            operation = lambda: self.backend.get_capabilities_text(index)
+            message = _("Capabilities command finished; review its output.")
+        elif which == "getvcp all":
+            operation = lambda: self.backend.get_all_vcps_text(index)
+            message = _("getvcp all command finished; review its output.")
+        else:
+            return
+
+        def on_result(value):
+            profile = self._cached_profile(index)
+            if which == "capabilities":
+                profile.capabilities_text = value
+            else:
+                profile.getvcp_all_text = value
+            if index == self.current_monitor_index():
+                self.current_profile = profile
+                self.update_from_profile()
+
+        self._submit_ddc(operation, on_result, message)
+
     def read_capabilities(self) -> None:
-        self.info(_("Bulk diagnostics temporarily disabled."))
+        self._read_diagnostic("capabilities")
 
     def read_getvcp_all(self) -> None:
-        self.info(_("Bulk diagnostics temporarily disabled."))
+        self._read_diagnostic("getvcp all")
 
     def _apply_value(self, setter: Callable[[], Any], message: str) -> None:
         def on_result(_value: Any) -> None:
@@ -1144,30 +1336,54 @@ class MainWindow(QMainWindow):
             _("Volume applied: {value}").format(value=value),
         )
 
-    def apply_red(self, value: int) -> None:
+    def _apply_rgb_gain(self, channel: str, value: int, message: str) -> None:
         index = self.current_monitor_index()
-        self._apply_value(
-            lambda: self.backend.set_rgb_gain(index, "red", value),
-            _("Red gain applied: {value}").format(value=value),
-        )
+
+        def operation():
+            try:
+                return self.backend.set_rgb_gain(index, channel, value)
+            except PlasmaDDCError as exc:
+                raw = str(exc)
+                if "DDCRC_VERIFY" in raw or "Verification failed for feature" in raw:
+                    raise PlasmaDDCError(
+                        _(
+                            "RGB verification failed for {channel}. Some monitors require "
+                            "User/Custom color mode. The setting may have changed anyway; "
+                            "use Read to check. No additional retry was sent by PlasmaDDC."
+                        ).format(channel=channel)
+                        + "\n\n" + raw
+                    ) from exc
+                raise
+
+        self._apply_value(operation, message)
+
+    def apply_red(self, value: int) -> None:
+        self._apply_rgb_gain("red", value, _("Red gain applied: {value}").format(value=value))
 
     def apply_green(self, value: int) -> None:
-        index = self.current_monitor_index()
-        self._apply_value(
-            lambda: self.backend.set_rgb_gain(index, "green", value),
-            _("Green gain applied: {value}").format(value=value),
-        )
+        self._apply_rgb_gain("green", value, _("Green gain applied: {value}").format(value=value))
 
     def apply_blue(self, value: int) -> None:
-        index = self.current_monitor_index()
-        self._apply_value(
-            lambda: self.backend.set_rgb_gain(index, "blue", value),
-            _("Blue gain applied: {value}").format(value=value),
-        )
+        self._apply_rgb_gain("blue", value, _("Blue gain applied: {value}").format(value=value))
 
     def apply_color_preset(self) -> None:
+        if self.color_preset_combo.currentData() is None:
+            return
         index = self.current_monitor_index()
         value = int(self.color_preset_combo.currentData())
+        if not self.demo_mode:
+            answer = QMessageBox.warning(
+                self,
+                APP_NAME,
+                _(
+                    "Preset {preset} is a generic MCCS value and may not be supported "
+                    "by this monitor. Apply it anyway?"
+                ).format(preset=color_preset_label(value)),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
 
         def set_preset() -> str:
             try:
