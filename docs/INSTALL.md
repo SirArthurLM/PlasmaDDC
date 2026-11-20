@@ -16,7 +16,10 @@ Before installing anything, check:
 
 Internal laptop panels usually do not use DDC/CI in the same way as external monitors.
 
-## 2. Quick installation
+## 2. Quick installation (virtual environment)
+
+The interactive installer sets up a private `.venv` and a desktop launcher.
+For the smaller APT-based installation, use section 4A instead.
 
 From the project directory:
 
@@ -59,6 +62,83 @@ sudo apt install ddcutil ddcui i2c-tools python3-pip python3-venv
 
 `ddcui` is optional, but useful for testing DDC/CI with an existing graphical interface.
 
+### 4A. Lightweight APT installation (Ubuntu / Kubuntu 26.04)
+
+This alternative was tested on **Kubuntu 26.04**. It uses the system Python
+and distro-provided PySide6/Qt packages instead of creating a private
+`.venv`. It was substantially smaller on the tested system, but space savings
+vary and package names/versions differ on other releases.
+
+1. Clone or download PlasmaDDC and enter the project directory.
+2. Install the system packages:
+
+   ```bash
+   sudo apt update
+   sudo apt install ddcutil i2c-tools python3-pyside6.qtwidgets
+   ```
+
+   The Widgets package also installs its required QtCore/QtGui bindings.
+   `monitorcontrol` is **optional**, and is needed only to use that auxiliary
+   Python backend; the default `ddcutil` backend needs no `monitorcontrol`
+   package. Check APT package availability on other Ubuntu/Debian versions.
+
+3. Configure I2C permissions as described in section 5 below (unless already
+   configured). **Never run PlasmaDDC as root.**
+4. Verify PySide6 and start the hardware-isolated demonstration:
+
+   ```bash
+   /usr/bin/python3 -c 'from PySide6.QtWidgets import QApplication; print("PySide6 OK")'
+   /usr/bin/python3 app.py --demo
+   ```
+
+5. When ready to access hardware, close the demo and run:
+
+   ```bash
+   /usr/bin/python3 app.py
+   ```
+
+   The GUI does not contact a real monitor at startup. Use **Detect monitors**
+   and explicitly consent before accessing hardware. If a GPU/driver hang has
+   occurred on this machine, avoid testing real DDC/CI until you understand
+   the risk; `--demo` does not access monitor hardware.
+
+**Important:** the current `install_plasmaddc.sh` installer creates `.venv`,
+and the repository's `run_plasmaddc.sh` requires `.venv/bin/python`. **Do not
+run those scripts for this APT-only method**; use `/usr/bin/python3 app.py`
+instead.
+
+#### Optional KDE Plasma application-menu shortcut
+
+If you want an entry in the application launcher, from the project directory:
+
+```bash
+APP_DIR="$(pwd -P)"
+mkdir -p "$HOME/.local/share/applications"
+cat > "$HOME/.local/share/applications/plasmaddc-system.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=PlasmaDDC (system Python)
+Comment=Control external monitors using DDC/CI
+Exec=/usr/bin/python3 "$APP_DIR/app.py"
+Path=$APP_DIR
+Terminal=false
+Categories=Settings;Utility;
+EOF
+```
+
+The shortcut uses the directory in which you ran the command. If you move
+or rename that directory, update the desktop entry. The distinct filename
+avoids overwriting the launcher created by the virtual-environment installer.
+For an existing KDE launcher, edit its command to point to the system Python
+and your actual `app.py` path instead of creating a duplicate. Do not launch
+PlasmaDDC as root.
+
+To run the automated tests with system PySide6 (no monitor access):
+
+```bash
+QT_QPA_PLATFORM=offscreen /usr/bin/python3 -m unittest discover -s tests -p 'test_*.py' -v
+```
+
 ## 5. Configure I2C permissions
 
 PlasmaDDC should not be run as root.
@@ -100,7 +180,9 @@ ddcutil detect
 
 Your user should belong to the `i2c` group, and `/dev/i2c-*` should usually belong to `root:i2c`.
 
-## 6. Create the Python environment manually
+## 6. Create the Python environment manually (non-APT method)
+
+**Skip this section if you chose the lightweight APT method.**
 
 From the project directory:
 
@@ -112,13 +194,15 @@ pip install -r requirements.txt
 
 ## 7. Run PlasmaDDC
 
-Graphical interface:
+Graphical interface with the virtual-environment installation:
 
 ```bash
 ./run_plasmaddc.sh
 ```
 
-CLI:
+With the lightweight APT installation, use `/usr/bin/python3 app.py` instead.
+
+CLI with a virtual environment:
 
 ```bash
 source .venv/bin/activate
@@ -126,9 +210,13 @@ python plasmaddc_cli.py list
 python plasmaddc_cli.py profile
 ```
 
+With the lightweight APT installation, use the system interpreter, e.g.
+`/usr/bin/python3 plasmaddc_cli.py list`.
+
 ## 8. Test DDC/CI manually
 
-Useful commands:
+These commands access actual monitor hardware and may be slow or unsafe
+on systems affected by driver hangs. Run them only when necessary:
 
 ```bash
 ddcutil detect
@@ -187,11 +275,20 @@ ddcutil capabilities
 ddcutil getvcp 10
 ```
 
-And these work inside the virtual environment:
+For the virtual-environment method, these work inside `.venv`:
 
 ```bash
 source .venv/bin/activate
-python backend.py
 python plasmaddc_cli.py profile
-python app.py
+python app.py --demo
 ```
+
+For the lightweight APT method, the following works without `.venv`:
+
+```bash
+/usr/bin/python3 -c 'from PySide6.QtWidgets import QApplication; print("PySide6 OK")'
+/usr/bin/python3 app.py --demo
+```
+
+Hardware-specific CLI commands and real-mode operations still require
+working DDC/CI permissions and a compatible monitor.

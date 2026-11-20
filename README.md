@@ -69,6 +69,12 @@ To test the GUI without querying actual DDC/CI hardware, use the new **demo mode
 ./run_plasmaddc.sh --demo
 ```
 
+With the lightweight system-Python installation described below, instead use:
+
+```bash
+/usr/bin/python3 app.py --demo
+```
+
 Demo mode creates two entirely simulated monitors and immediately fills in
 brightness, contrast, RGB gains, volume, color preset, and input selection.
 All **Read**, **Apply**, and **Change input** actions operate exclusively on
@@ -87,6 +93,9 @@ For automated offline checks (with PySide6 installed):
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
+For a system-Python installation without `.venv`, replace `.venv/bin/python`
+with `/usr/bin/python3`.
+
 **Do not use normal hardware mode on a system with an unresolved GPU/DDC/CI
 freeze.** Demo mode can validate GUI behavior, not real driver stability.
 
@@ -104,8 +113,10 @@ General requirements:
 - `ddcutil`
 - Python 3
 - PySide6
-- monitorcontrol
 - Access to `/dev/i2c-*`
+
+`monitorcontrol` is optional for the auxiliary backend. The default `ddcutil`
+backend works without the `monitorcontrol` Python package.
 
 On Ubuntu, Kubuntu, Debian and related distributions, the installer can help install and configure most requirements automatically.
 
@@ -124,6 +135,43 @@ The installer may ask for `sudo` only when it needs to install system packages o
 
 If the installer adds your user to the `i2c` group, you may need to log out and log back in before DDC/CI access works correctly.
 
+### Lightweight alternative: system PySide6 (Kubuntu / Ubuntu 26.04)
+
+**Tested on Kubuntu 26.04.** Instead of installing PySide6 with `pip` in a
+separate `.venv`, use the distribution's shared Qt/PySide6 packages. This can
+save substantial disk space; the actual savings depend on existing packages.
+
+From a checkout of this repository, install system dependencies:
+
+```bash
+sudo apt update
+sudo apt install ddcutil i2c-tools python3-pyside6.qtwidgets
+```
+
+`python3-pyside6.qtwidgets` brings in QtCore and QtGui dependencies. Check
+package availability on other distributions/releases before using this method.
+Make sure your user has access to `/dev/i2c-*` (see the I2C section in the
+installation guide). **Do not run the GUI with `sudo`.**
+
+Check the system binding and open the hardware-isolated demo:
+
+```bash
+/usr/bin/python3 -c 'from PySide6.QtWidgets import QApplication; print("PySide6 OK")'
+/usr/bin/python3 app.py --demo
+```
+
+To use a real monitor, close demo mode and run `/usr/bin/python3 app.py`.
+Real DDC/CI operations still require explicit consent. The auxiliary
+`monitorcontrol` backend will be unavailable unless separately installed;
+`ddcutil` remains the primary backend.
+
+**Important:** `install_plasmaddc.sh` and the repository's
+`run_plasmaddc.sh` currently use the *virtual-environment* installation.
+Do not run the installer for this lightweight method, and launch with
+`/usr/bin/python3 app.py` rather than `./run_plasmaddc.sh`. See the
+[installation guide](docs/INSTALL.md#4a-lightweight-apt-installation-ubuntu--kubuntu-2604)
+for an optional KDE application-menu shortcut and details.
+
 More detailed instructions are available in:
 
 ```text
@@ -132,10 +180,16 @@ docs/INSTALL.md
 
 ## Run the graphical application
 
-After installation:
+With the virtual-environment installer:
 
 ```bash
 ./run_plasmaddc.sh
+```
+
+With the lightweight APT method, from the project directory:
+
+```bash
+/usr/bin/python3 app.py
 ```
 
 If the desktop launcher was created, you can also search for:
@@ -169,13 +223,19 @@ To run the language and GUI checks without a connected monitor:
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m unittest discover -s tests -v
 ```
 
+For the lightweight APT installation, use `/usr/bin/python3` in place of
+`.venv/bin/python`.
+
 ## CLI usage
 
-Activate the virtual environment first:
+With the virtual-environment installation, activate it first:
 
 ```bash
 source .venv/bin/activate
 ```
+
+With the lightweight APT installation, skip activation and use
+`/usr/bin/python3` instead of `python` in the examples below.
 
 Useful examples:
 
@@ -222,6 +282,9 @@ chmod +x uninstall_plasmaddc.sh
 ```
 
 The uninstaller is conservative and asks before removing files or changing system configuration.
+It is intended for installations managed by `install_plasmaddc.sh`. For a
+manual lightweight APT installation, remove only the files and any menu
+shortcut you created yourself; do not blindly purge shared system packages.
 
 More details are available in:
 
