@@ -294,3 +294,24 @@ source .venv/bin/activate
 python backend.py
 python plasmaddc_cli.py profile
 ```
+
+## DDC/CI diagnostics show parsing errors or a partial result
+
+The **Diagnostics** page can run `capabilities` and `getvcp all` only after
+monitor detection and an additional confirmation. They are intentionally
+unavailable in `--demo`. A capability string is supplied by monitor firmware;
+`ddcutil` may report invalid VCP values, an unparseable response, or even
+inconsistent MCCS versions. Such warnings do not necessarily indicate an
+application defect.
+
+For `getvcp all`, an unsupported or nonresponding individual VCP can cause a
+nonzero exit code despite many successful readings. PlasmaDDC retains that
+partial result and labels it as potentially incomplete. An invalid UTF-8 byte
+is escaped in the displayed output rather than crashing the GUI.
+
+**GPU-driver safety:** Real DDC/CI access has previously coincided with an
+`amdgpu` hang on an AMD/DisplayPort configuration. Even one request might
+trigger a faulty driver; moving commands off the GUI thread is not a hardware
+safety guarantee. If your system has a history of DDC/CI-related GPU freezes,
+avoid real diagnostics and use `./run_plasmaddc.sh --demo` for GUI tests.
+Do not run repeated/bulk scans solely to investigate a GUI presentation issue.

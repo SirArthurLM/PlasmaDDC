@@ -1,6 +1,6 @@
 [project]
 name = "plasmaddc"
-version = "1.0.0"
+version = "1.1.0"
 description = "Linux DDC/CI monitor control application with PySide6"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -10,8 +10,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/TU_USUARIO/PlasmaDDC"
-Repository = "https://github.com/TU_USUARIO/PlasmaDDC"
+Homepage = "https://github.com/SirArthurLM/PlasmaDDC"
+Repository = "https://github.com/SirArthurLM/PlasmaDDC"
 
 [tool.ruff]
 line-length = 100

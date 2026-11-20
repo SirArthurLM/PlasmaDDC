@@ -23,37 +23,43 @@ The project is designed especially for KDE Plasma users, but it should also work
 - Provide a conservative uninstaller
 - Avoid running the graphical application as root
 - Select English, Spanish, or your system language in Preferences
+- Read Picture, Color, Audio, and Input controls by section, on demand
+- Use simulated monitors in `--demo` mode, without DDC/CI access
+- Run advanced diagnostics only after explicit confirmation
 
 ## Current status
 
-PlasmaDDC 1.0 is a working first version.
+**PlasmaDDC 1.1.0** adds opt-in, serialized DDC/CI operations, section reads,
+a self-contained demo mode, bilingual preferences, and improved diagnostics.
+See [CHANGELOG.md](CHANGELOG.md) for release details and credits.
 
-It currently uses:
+It uses `ddcutil` as its primary backend, `monitorcontrol` as an auxiliary
+backend, and PySide6 for its graphical interface. Development and initial
+hardware validation took place on Kubuntu / KDE Plasma / Wayland. Monitor and
+GPU-driver behavior varies, so success on one system does not establish general
+hardware compatibility.
 
-- `ddcutil` as the main backend
-- `monitorcontrol` as an auxiliary backend
-- PySide6 for the graphical interface
+## Hardware access and driver safety
 
-The application has been developed and tested mainly on Kubuntu / KDE Plasma / Wayland.
+The GUI uses conservative defaults because a severe `amdgpu` GPU/desktop hang
+was observed on an AMD/DisplayPort configuration with the original startup
+behavior. The underlying driver issue has **not** been proven fixed.
 
-### Experimental AMD/DisplayPort safety work (development branch)
+- Starting in real mode **does not automatically detect or query** monitors.
+- Before the first real DDC/CI operation in a session, the GUI asks for consent.
+- The **Detect monitors** action identifies a monitor but does not bulk-read its
+  settings; use individual **Read** buttons or **Read this section** to load values.
+- Real operations run on a Qt background worker, **one at a time**. Section reads
+  are sequential and require confirmation for multiple requests.
+- `capabilities` and `getvcp all` are available under **Diagnostics**, but only
+  on demand with explicit confirmation. They can issue many DDC/CI requests.
+- Language changes reuse cached values and never trigger hardware reads.
 
-The `fix/safe-ddc-startup` branch is **not yet a hardware-validated release**.
-After an observed `amdgpu` driver freeze when PlasmaDDC was launched on
-AMD/DisplayPort, this branch intentionally:
-
-- Opens without detecting or reading any monitor.
-- Requests consent before the first DDC/CI operation in each session.
-- Performs explicitly requested queries/writes on a Qt worker thread, one at a time.
-- Allows individual **Read** requests; disables **Read values** (bulk eight-VCP
-  read), `capabilities`, and `getvcp all` until the driver issue is understood.
-- Reuses cached values when changing language; never re-reads for translations.
-
-**Warning:** Background execution prevents a slow command from directly blocking
-Qt's event loop, but it cannot protect against a faulty kernel/GPU driver.
-Even an individual read or detection can still freeze the entire desktop.
-Do not use hardware operations on a configuration known to hang until it can
-be tested under suitable precautions. Automated tests use simulated backends.
+**Warning:** A background thread keeps a slow operation from directly blocking
+Qt's GUI thread; it **cannot prevent** a kernel graphics-driver hang. A single
+DDC/CI command might still freeze a susceptible system. Use `--demo` instead
+if you cannot safely test real DDC/CI operations. These GUI safeguards do not
+change the independent CLI's behavior.
 
 ## Demo mode (safe simulated monitors)
 
@@ -150,7 +156,8 @@ English, unsupported, or unavailable locales use English.
 The preference is stored in Qt's per-user settings (`PlasmaDDC/PlasmaDDC`, key
 `language`). On Linux this is normally `~/.config/PlasmaDDC/PlasmaDDC.conf`.
 Language changes refresh the interface using previously cached values, without
-accessing the monitor. Raw diagnostic output comes from `ddcutil` unchanged.
+accessing the monitor. Diagnostic output originates from `ddcutil`; invalid
+UTF-8 bytes are escaped so that the result can be displayed instead of crashing.
 
 English messages are the fallback source text. The Spanish catalog lives in
 `translations/es.json`; translated messages must preserve their format placeholders.
@@ -266,12 +273,21 @@ Advanced **capabilities** and **getvcp all** diagnostics are available only
 after monitor detection and explicit confirmation. They may perform many
 DDC/CI requests and **can still trigger a kernel graphics-driver hang** even
 though the GUI uses a background thread. They are disabled in `--demo`.
+Diagnostics show useful partial output even when `ddcutil` returns a nonzero
+exit code, while clearly marking that the result could be incomplete. Parsing
+warnings in a capabilities response are produced by `ddcutil` and do not, by
+themselves, indicate a PlasmaDDC failure.
 
 ## Known limitations
 
 Not all monitors support the same VCP codes.
 
-Some monitors may support brightness and contrast but not volume, RGB gain, input switching, or color presets.
+Some monitors may support brightness and contrast but not volume, RGB gain,
+input switching, or color presets. Generic preset names are **not** a supported
+values list for the connected monitor. A failed write verification does not
+prove that the monitor rejected the setting; review its OSD/readback before
+repeating a command. Some monitor capabilities strings are incomplete or
+malformed, and the reported MCCS version may not match VCP `0xDF`.
 
 Some gaming features such as game mode, overdrive, FreeSync / Adaptive-Sync, HDR modes, dynamic contrast or crosshair overlays may be proprietary and may not be exposed through standard DDC/CI.
 
@@ -300,6 +316,8 @@ ls -l /dev/i2c-*
 PlasmaDDC/
 ├── app.py
 ├── backend.py
+├── demo_backend.py
+├── i18n.py
 ├── plasmaddc_cli.py
 ├── install_plasmaddc.sh
 ├── uninstall_plasmaddc.sh
@@ -308,9 +326,18 @@ PlasmaDDC/
 ├── pyproject.toml
 ├── LICENSE
 ├── README.md
-├── assets/
+├── CHANGELOG.md
+├── translations/
+├── tests/
 └── docs/
 ```
+
+## Contributors
+
+PlasmaDDC is maintained by [SirArthurLM](https://github.com/SirArthurLM).
+Thanks to [Marcel Vojtkovszky](https://github.com/mvojtkovszky) for the
+English/Spanish language preferences and persistent language selection
+contributed through pull request #1.
 
 ## License
 

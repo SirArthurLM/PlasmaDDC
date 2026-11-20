@@ -6,7 +6,7 @@ VCP means **Virtual Control Panel**. Each VCP code represents a monitor control 
 
 Not every monitor supports every VCP code.
 
-## Currently used by PlasmaDDC 1.0
+## Currently used by PlasmaDDC 1.1.0
 
 | Code | Name | Used for |
 |---|---|---|
@@ -108,11 +108,17 @@ DP2
 | `0x0C` | User 2 |
 | `0x0D` | User 3 |
 
-Not all monitors support all presets.
+Not all monitors support all presets. PlasmaDDC offers these generic MCCS
+choices but does not automatically filter them by monitor capabilities.
+For example, `0x04` denotes 5000 K; if `0x04` is absent from a monitor's
+`0x14(...)` capabilities list, it is not advertised as a supported preset.
+Capabilities strings can be malformed or incomplete, so this is a useful
+clue rather than a definitive guarantee.
 
 ## Extra VCP codes worth exploring
 
-These are not part of PlasmaDDC 1.0, but may be useful for future versions.
+These are not exposed as regular controls in PlasmaDDC 1.1.0, but may be
+useful for future versions.
 
 | Code | Possible use |
 |---|---|
